@@ -51,16 +51,35 @@ sudo mkdir -p $PISTON_DIR $DATA_DIR/piston/packages
 
 # Log in to ECR when pulling a private ECR image
 if [[ "$IMAGE" == *.amazonaws.com/* ]]; then
-    if command -v aws &> /dev/null; then
+    # Derive ECR registry and region from the image name
+    ECR_REGISTRY="${IMAGE%%/*}"
+    # If AWS_REGION is not provided, try to parse it from the registry host
+    if [ -z "$AWS_REGION" ]; then
+        AWS_REGION=$(echo "$ECR_REGISTRY" | awk -F'.' '{print $(NF-3)}')
         if [ -z "$AWS_REGION" ]; then
-            log_warn "AWS_REGION not set; skipping ECR login"
+            log_error "AWS_REGION not set and could not be derived from $ECR_REGISTRY"
+            exit 1
         else
-            ECR_REGISTRY="${IMAGE%%/*}"
-            log_info "Logging in to ECR registry: $ECR_REGISTRY"
-            aws ecr get-login-password --region "$AWS_REGION" | sudo docker login --username AWS --password-stdin "$ECR_REGISTRY"
+            log_info "Derived AWS_REGION=$AWS_REGION from registry host"
+        fi
+    fi
+
+    # Ensure aws cli is present (for role-based auth on the instance)
+    if ! command -v aws &> /dev/null; then
+        log_warn "AWS CLI not installed; attempting to install awscli"
+        sudo apt-get update -y >/dev/null 2>&1 || true
+        sudo apt-get install -y awscli >/dev/null 2>&1 || true
+    fi
+
+    if command -v aws &> /dev/null; then
+        log_info "Logging in to ECR registry: $ECR_REGISTRY"
+        if ! aws ecr get-login-password --region "$AWS_REGION" | sudo docker login --username AWS --password-stdin "$ECR_REGISTRY"; then
+            log_error "ECR login failed. Ensure the EC2 instance role has ECR pull permissions and AWS CLI can obtain credentials."
+            exit 1
         fi
     else
-        log_warn "AWS CLI not installed; skipping ECR login"
+        log_error "AWS CLI missing; cannot log in to ECR. Install awscli or ensure it is available."
+        exit 1
     fi
 fi
 
