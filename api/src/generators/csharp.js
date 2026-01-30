@@ -4,7 +4,10 @@ const BaseGenerator = require('./base');
  * C# test runner generator
  *
  * PASS-THROUGH MODE: Call expressions are embedded directly in generated C# code.
- * The call syntax must be valid C# (e.g., "Solution.Add(1, 2)")
+ * The call syntax must be valid C# (e.g., "Solution.Add(1, 2)" or just "Add(1, 2)")
+ *
+ * If a call doesn't have a class prefix, the generator will try to find the
+ * user's class and prepend it automatically.
  */
 class CSharpGenerator extends BaseGenerator {
     constructor() {
@@ -23,11 +26,37 @@ class CSharpGenerator extends BaseGenerator {
     generateRunner(userFiles, testCases) {
         const mainFile = userFiles[0];
 
+        // Extract class names from user code
+        // Look for public class or just class declarations
+        const classPattern = /(?:public\s+)?(?:static\s+)?class\s+(\w+)/g;
+        const classNames = [];
+        let match;
+        while ((match = classPattern.exec(mainFile.content)) !== null) {
+            classNames.push(match[1]);
+        }
+
+        // The primary class to use for unprefixed calls (usually "Solution" or the first found)
+        const primaryClass = classNames.find(n => n === 'Solution') || classNames[0] || null;
+
         // Generate test method calls - call expressions are embedded directly
         const testCalls = testCases.map((tc, i) => {
             const expectedJson = this.escapeCSharp(JSON.stringify(tc.expected));
-            // The call is used directly as C# code
-            const callCode = tc.call;
+
+            // Check if call already has a class prefix (e.g., "Solution.Method" or "MyClass.Method")
+            // A bare function call starts with a letter and has '(' without a '.' before it
+            let callCode = tc.call;
+
+            if (primaryClass) {
+                // Check if the call starts with a function name (no class prefix)
+                // Pattern: starts with letter, then word chars, then '(' - but NOT preceded by '.'
+                const hasClassPrefix = /^[A-Z][a-zA-Z0-9_]*\./.test(callCode);
+
+                if (!hasClassPrefix) {
+                    // Prepend the primary class name
+                    callCode = `${primaryClass}.${callCode}`;
+                }
+            }
+
             return `
             {
                 int index = ${i};

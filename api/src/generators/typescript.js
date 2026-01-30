@@ -20,9 +20,50 @@ class TypeScriptGenerator extends BaseGenerator {
             expected: tc.expected
         })));
 
-        const runnerCode = `// TypeScript declarations for Node.js globals
+        const runnerCode = `// TypeScript declarations for globals and ES2015+ features
 declare const process: { stdout: { write: (s: string) => void } };
 declare function require(name: string): any;
+
+// ES2015+ type declarations (for environments without lib es2015)
+interface SetConstructor {
+    new <T = any>(values?: readonly T[] | null): Set<T>;
+    readonly prototype: Set<any>;
+}
+interface Set<T> {
+    add(value: T): this;
+    clear(): void;
+    delete(value: T): boolean;
+    forEach(callbackfn: (value: T, value2: T, set: Set<T>) => void, thisArg?: any): void;
+    has(value: T): boolean;
+    readonly size: number;
+    [Symbol.iterator](): IterableIterator<T>;
+}
+declare var Set: SetConstructor;
+
+interface MapConstructor {
+    new <K = any, V = any>(entries?: readonly (readonly [K, V])[] | null): Map<K, V>;
+    readonly prototype: Map<any, any>;
+}
+interface Map<K, V> {
+    clear(): void;
+    delete(key: K): boolean;
+    forEach(callbackfn: (value: V, key: K, map: Map<K, V>) => void, thisArg?: any): void;
+    get(key: K): V | undefined;
+    has(key: K): boolean;
+    set(key: K, value: V): this;
+    readonly size: number;
+}
+declare var Map: MapConstructor;
+
+interface SymbolConstructor {
+    readonly iterator: symbol;
+    readonly toStringTag: symbol;
+}
+declare var Symbol: SymbolConstructor;
+
+interface IterableIterator<T> {
+    next(): { value: T; done: boolean };
+}
 
 // Capture console output from user code
 const __capturedLogs__: any[] = [];

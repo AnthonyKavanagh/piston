@@ -4,7 +4,10 @@ const BaseGenerator = require('./base');
  * Java test runner generator
  *
  * PASS-THROUGH MODE: Call expressions are embedded directly in generated Java code.
- * The call syntax must be valid Java (e.g., "Solution.add(1, 2)")
+ * The call syntax must be valid Java (e.g., "Solution.add(1, 2)" or just "add(1, 2)")
+ *
+ * If a call doesn't have a class prefix, the generator will try to find the
+ * user's class and prepend it automatically.
  */
 class JavaGenerator extends BaseGenerator {
     constructor() {
@@ -22,13 +25,35 @@ class JavaGenerator extends BaseGenerator {
 
     generateRunner(userFiles, testCases) {
         const mainFile = userFiles[0];
-        const className = mainFile.name.replace(/\.java$/, '');
+
+        // Extract class names from user code
+        const classPattern = /(?:public\s+)?class\s+(\w+)/g;
+        const classNames = [];
+        let match;
+        while ((match = classPattern.exec(mainFile.content)) !== null) {
+            classNames.push(match[1]);
+        }
+
+        // The primary class to use for unprefixed calls (usually "Solution" or the first found)
+        const primaryClass = classNames.find(n => n === 'Solution') || classNames[0] || null;
 
         // Generate test method calls - call expressions are embedded directly
         const testCalls = testCases.map((tc, i) => {
             const expectedJson = this.escapeJava(JSON.stringify(tc.expected));
-            // The call is used directly as Java code
-            const callCode = tc.call;
+
+            // Check if call already has a class prefix
+            let callCode = tc.call;
+
+            if (primaryClass) {
+                // Check if the call starts with a function name (no class prefix)
+                const hasClassPrefix = /^[A-Z][a-zA-Z0-9_]*\./.test(callCode);
+
+                if (!hasClassPrefix) {
+                    // Prepend the primary class name
+                    callCode = `${primaryClass}.${callCode}`;
+                }
+            }
+
             return `
             try {
                 Object actual = ${callCode};
@@ -40,10 +65,17 @@ class JavaGenerator extends BaseGenerator {
             }`;
         }).join('\n');
 
+        // Remove package declaration from user code if present (to allow compilation in same directory)
+        let userCode = mainFile.content;
+        userCode = userCode.replace(/^\s*package\s+[\w.]+\s*;\s*/m, '');
+
         const runnerCode = `
 import java.util.*;
 import com.google.gson.Gson;
 import com.google.gson.GsonBuilder;
+
+// User code
+${userCode}
 
 public class __TestRunner__ {
     static Gson gson = new GsonBuilder().serializeNulls().create();
@@ -85,15 +117,24 @@ public class __TestRunner__ {
             return true;
         }
 
-        // Handle arrays
-        if (a.getClass().isArray() && b instanceof List) {
-            List<?> lb = (List<?>) b;
+        // Handle arrays (convert to list comparison)
+        if (a.getClass().isArray()) {
             int len = java.lang.reflect.Array.getLength(a);
-            if (len != lb.size()) return false;
-            for (int i = 0; i < len; i++) {
-                if (!deepEquals(java.lang.reflect.Array.get(a, i), lb.get(i))) return false;
+            if (b instanceof List) {
+                List<?> lb = (List<?>) b;
+                if (len != lb.size()) return false;
+                for (int i = 0; i < len; i++) {
+                    if (!deepEquals(java.lang.reflect.Array.get(a, i), lb.get(i))) return false;
+                }
+                return true;
+            } else if (b.getClass().isArray()) {
+                int lenB = java.lang.reflect.Array.getLength(b);
+                if (len != lenB) return false;
+                for (int i = 0; i < len; i++) {
+                    if (!deepEquals(java.lang.reflect.Array.get(a, i), java.lang.reflect.Array.get(b, i))) return false;
+                }
+                return true;
             }
-            return true;
         }
 
         // Handle maps
@@ -115,17 +156,79 @@ public class __TestRunner__ {
         return a.equals(b);
     }
 
+    static String serialize(Object obj) {
+        if (obj == null) return "null";
+        if (obj instanceof Boolean) return obj.toString();
+        if (obj instanceof Number) {
+            double d = ((Number) obj).doubleValue();
+            if (Double.isNaN(d)) return "\\"NaN\\"";
+            if (Double.isInfinite(d)) return d > 0 ? "\\"Infinity\\"" : "\\"-Infinity\\"";
+            if (obj instanceof Integer || obj instanceof Long) return obj.toString();
+            return obj.toString();
+        }
+        if (obj instanceof String) {
+            return "\\"" + ((String) obj).replace("\\\\", "\\\\\\\\").replace("\\"", "\\\\\\"") + "\\"";
+        }
+        if (obj instanceof List) {
+            List<?> list = (List<?>) obj;
+            StringBuilder sb = new StringBuilder("[");
+            for (int i = 0; i < list.size(); i++) {
+                if (i > 0) sb.append(",");
+                sb.append(serialize(list.get(i)));
+            }
+            sb.append("]");
+            return sb.toString();
+        }
+        if (obj.getClass().isArray()) {
+            int len = java.lang.reflect.Array.getLength(obj);
+            StringBuilder sb = new StringBuilder("[");
+            for (int i = 0; i < len; i++) {
+                if (i > 0) sb.append(",");
+                sb.append(serialize(java.lang.reflect.Array.get(obj, i)));
+            }
+            sb.append("]");
+            return sb.toString();
+        }
+        if (obj instanceof Map) {
+            Map<?, ?> map = (Map<?, ?>) obj;
+            StringBuilder sb = new StringBuilder("{");
+            boolean first = true;
+            for (Map.Entry<?, ?> entry : map.entrySet()) {
+                if (!first) sb.append(",");
+                first = false;
+                sb.append("\\"").append(entry.getKey()).append("\\":");
+                sb.append(serialize(entry.getValue()));
+            }
+            sb.append("}");
+            return sb.toString();
+        }
+        return "\\"" + obj.toString() + "\\"";
+    }
+
     public static void main(String[] args) {
         List<TestResult> results = new ArrayList<>();
         ${testCalls}
-        System.out.println(gson.toJson(results));
+
+        // Output results as JSON
+        StringBuilder sb = new StringBuilder("[");
+        for (int i = 0; i < results.size(); i++) {
+            if (i > 0) sb.append(",");
+            TestResult r = results.get(i);
+            sb.append("{");
+            sb.append("\\"index\\":").append(r.index);
+            sb.append(",\\"actual\\":").append(serialize(r.actual));
+            sb.append(",\\"passed\\":").append(r.passed);
+            sb.append(",\\"error\\":").append(r.error == null ? "null" : "\\"" + r.error.replace("\\\\", "\\\\\\\\").replace("\\"", "\\\\\\"") + "\\"");
+            sb.append("}");
+        }
+        sb.append("]");
+        System.out.println(sb.toString());
     }
 }
 `;
 
         return {
             files: [
-                mainFile,
                 { name: '__TestRunner__.java', content: runnerCode.trim() }
             ],
             entryPoint: '__TestRunner__.java',

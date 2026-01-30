@@ -5,6 +5,10 @@ const BaseGenerator = require('./base');
  *
  * PASS-THROUGH MODE: Call expressions are embedded directly in generated C++ code.
  * The call syntax must be valid C++ (e.g., "add(1, 2)")
+ *
+ * Expected values can be provided in either:
+ * - JSON format: [[1,1],[2,2]]
+ * - C++ initializer list format: "{{1,1},{2,2}}" (will be auto-converted)
  */
 class CppGenerator extends BaseGenerator {
     constructor() {
@@ -20,12 +24,82 @@ class CppGenerator extends BaseGenerator {
             .replace(/\t/g, '\\t');
     }
 
+    /**
+     * Convert C++ initializer list syntax to JSON
+     * Examples:
+     *   "{{1,1},{2,2}}" → [[1,1],[2,2]]
+     *   "{1,2,3}" → [1,2,3]
+     *   "{}" → []
+     */
+    convertCppToJson(value) {
+        if (typeof value !== 'string') {
+            return value;
+        }
+
+        // Check if it looks like C++ initializer list syntax
+        const trimmed = value.trim();
+        if (!trimmed.startsWith('{') || !trimmed.endsWith('}')) {
+            return value; // Not C++ syntax, return as-is
+        }
+
+        try {
+            // Replace { } with [ ] while preserving strings
+            let result = '';
+            let inString = false;
+            let escapeNext = false;
+
+            for (let i = 0; i < trimmed.length; i++) {
+                const char = trimmed[i];
+
+                if (escapeNext) {
+                    result += char;
+                    escapeNext = false;
+                    continue;
+                }
+
+                if (char === '\\') {
+                    result += char;
+                    escapeNext = true;
+                    continue;
+                }
+
+                if (char === '"') {
+                    inString = !inString;
+                    result += char;
+                    continue;
+                }
+
+                if (!inString) {
+                    if (char === '{') {
+                        result += '[';
+                    } else if (char === '}') {
+                        result += ']';
+                    } else {
+                        result += char;
+                    }
+                } else {
+                    result += char;
+                }
+            }
+
+            // Try to parse as JSON
+            const parsed = JSON.parse(result);
+            return parsed;
+        } catch (e) {
+            // If conversion fails, return original value
+            return value;
+        }
+    }
+
     generateRunner(userFiles, testCases) {
         const mainFile = userFiles[0];
 
         // Generate test calls - call expressions are embedded directly
         const testCalls = testCases.map((tc, i) => {
-            const expectedJson = this.escapeCpp(JSON.stringify(tc.expected));
+            // Convert C++ syntax to JSON if needed
+            const expected = this.convertCppToJson(tc.expected);
+            const expectedJson = this.escapeCpp(JSON.stringify(expected));
+
             // The call is used directly as C++ code
             const callCode = tc.call;
             return `
@@ -113,6 +187,18 @@ bool compareResults(const std::vector<T>& actual, const json& expected) {
     if (!expected.is_array() || actual.size() != expected.size()) return false;
     for (size_t i = 0; i < actual.size(); ++i) {
         if (!compareResults(actual[i], expected[i])) return false;
+    }
+    return true;
+}
+
+// Specialization for vector of pairs
+template<typename T1, typename T2>
+bool compareResults(const std::vector<std::pair<T1,T2>>& actual, const json& expected) {
+    if (!expected.is_array() || actual.size() != expected.size()) return false;
+    for (size_t i = 0; i < actual.size(); ++i) {
+        if (!expected[i].is_array() || expected[i].size() != 2) return false;
+        json actualPair = {actual[i].first, actual[i].second};
+        if (actualPair != expected[i]) return false;
     }
     return true;
 }
