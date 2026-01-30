@@ -148,8 +148,8 @@ print(json.dumps(results))
 
         return {
             files: [
-                ...userFiles,
-                { name: '__test_runner__.py', content: runnerCode.trim() }
+                { name: '__test_runner__.py', content: runnerCode.trim() },
+                ...userFiles
             ],
             entryPoint: '__test_runner__.py',
             stdin: JSON.stringify(testData)

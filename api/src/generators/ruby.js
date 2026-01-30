@@ -122,8 +122,8 @@ puts JSON.generate(results)
 
         return {
             files: [
-                ...userFiles,
-                { name: '__test_runner__.rb', content: runnerCode.trim() }
+                { name: '__test_runner__.rb', content: runnerCode.trim() },
+                ...userFiles
             ],
             entryPoint: '__test_runner__.rb',
             stdin: JSON.stringify(testData)
