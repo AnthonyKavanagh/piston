@@ -79,9 +79,6 @@ class JavaGenerator extends BaseGenerator {
 import java.util.*;
 import java.lang.reflect.Array;
 
-// User code
-${userCode}
-
 public class __TestRunner__ {
 
     static String serialize(Object obj) {
@@ -317,6 +314,9 @@ public class __TestRunner__ {
         System.out.println("[" + String.join(",", results) + "]");
     }
 }
+
+// User code
+${userCode}
 `;
 
         return {
