@@ -22,7 +22,6 @@ class CSharpGenerator extends BaseGenerator {
 
     generateRunner(userFiles, testCases) {
         const mainFile = userFiles[0];
-        const className = mainFile.name.replace(/\.cs$/, '');
 
         // Generate test method calls - call expressions are embedded directly
         const testCalls = testCases.map((tc, i) => {
@@ -30,36 +29,147 @@ class CSharpGenerator extends BaseGenerator {
             // The call is used directly as C# code
             const callCode = tc.call;
             return `
-            try
             {
-                var actual = ${callCode};
-                var expected = JsonConvert.DeserializeObject<object>("${expectedJson}");
-                bool passed = DeepEquals(actual, expected);
-                results.Add(new TestResult { Index = ${i}, Actual = actual, Passed = passed, Error = null });
-            }
-            catch (Exception e)
-            {
-                results.Add(new TestResult { Index = ${i}, Actual = null, Passed = false, Error = e.GetType().Name + ": " + e.Message });
+                int index = ${i};
+                try
+                {
+                    var actual = ${callCode};
+                    var expectedStr = "${expectedJson}";
+                    bool passed = CompareWithExpected(actual, expectedStr);
+                    results.Add(FormatResult(index, Serialize(actual), passed, null));
+                }
+                catch (Exception e)
+                {
+                    results.Add(FormatResult(index, "null", false, e.GetType().Name + ": " + e.Message));
+                }
             }`;
         }).join('\n');
 
+        // Embed user code directly like C++
         const runnerCode = `
 using System;
 using System.Collections;
 using System.Collections.Generic;
 using System.Linq;
-using Newtonsoft.Json;
+using System.Text;
+using System.Text.RegularExpressions;
 
-public class TestResult
-{
-    public int Index { get; set; }
-    public object Actual { get; set; }
-    public bool Passed { get; set; }
-    public string Error { get; set; }
-}
+// User code
+${mainFile.content}
 
 public class __TestRunner__
 {
+    static string Serialize(object obj)
+    {
+        if (obj == null) return "null";
+        if (obj is bool b) return b ? "true" : "false";
+        if (obj is string s) return "\\"" + s.Replace("\\\\", "\\\\\\\\").Replace("\\"", "\\\\\\"") + "\\"";
+        if (obj is char c) return "\\"" + c + "\\"";
+        if (IsNumeric(obj))
+        {
+            double d = Convert.ToDouble(obj);
+            if (double.IsNaN(d)) return "\\"NaN\\"";
+            if (double.IsPositiveInfinity(d)) return "\\"Infinity\\"";
+            if (double.IsNegativeInfinity(d)) return "\\"-Infinity\\"";
+            return obj.ToString();
+        }
+        if (obj is IEnumerable && !(obj is string))
+        {
+            var items = new List<string>();
+            foreach (var item in (IEnumerable)obj)
+                items.Add(Serialize(item));
+            return "[" + string.Join(",", items) + "]";
+        }
+        if (obj is IDictionary dict)
+        {
+            var pairs = new List<string>();
+            foreach (DictionaryEntry entry in dict)
+                pairs.Add("\\"" + entry.Key.ToString() + "\\":" + Serialize(entry.Value));
+            return "{" + string.Join(",", pairs) + "}";
+        }
+        // For tuples and other types, try to serialize as array
+        var type = obj.GetType();
+        if (type.IsGenericType && type.Name.StartsWith("ValueTuple"))
+        {
+            var fields = type.GetFields();
+            var items = new List<string>();
+            foreach (var field in fields)
+                items.Add(Serialize(field.GetValue(obj)));
+            return "[" + string.Join(",", items) + "]";
+        }
+        return "\\"" + obj.ToString() + "\\"";
+    }
+
+    static object ParseJson(string json)
+    {
+        json = json.Trim();
+        if (json == "null") return null;
+        if (json == "true") return true;
+        if (json == "false") return false;
+        if (json.StartsWith("\\"") && json.EndsWith("\\""))
+            return json.Substring(1, json.Length - 2);
+        if (json.StartsWith("[") && json.EndsWith("]"))
+        {
+            var list = new List<object>();
+            var inner = json.Substring(1, json.Length - 2).Trim();
+            if (string.IsNullOrEmpty(inner)) return list;
+            foreach (var item in SplitJson(inner))
+                list.Add(ParseJson(item));
+            return list;
+        }
+        if (json.StartsWith("{") && json.EndsWith("}"))
+        {
+            var dict = new Dictionary<string, object>();
+            var inner = json.Substring(1, json.Length - 2).Trim();
+            if (string.IsNullOrEmpty(inner)) return dict;
+            foreach (var pair in SplitJson(inner))
+            {
+                var colonIdx = pair.IndexOf(':');
+                if (colonIdx > 0)
+                {
+                    var key = pair.Substring(0, colonIdx).Trim().Trim('"');
+                    var val = pair.Substring(colonIdx + 1).Trim();
+                    dict[key] = ParseJson(val);
+                }
+            }
+            return dict;
+        }
+        if (double.TryParse(json, out double d)) return d;
+        return json;
+    }
+
+    static List<string> SplitJson(string json)
+    {
+        var result = new List<string>();
+        int depth = 0;
+        int start = 0;
+        bool inString = false;
+        for (int i = 0; i < json.Length; i++)
+        {
+            char c = json[i];
+            if (c == '"' && (i == 0 || json[i-1] != '\\\\')) inString = !inString;
+            if (!inString)
+            {
+                if (c == '[' || c == '{') depth++;
+                else if (c == ']' || c == '}') depth--;
+                else if (c == ',' && depth == 0)
+                {
+                    result.Add(json.Substring(start, i - start).Trim());
+                    start = i + 1;
+                }
+            }
+        }
+        if (start < json.Length)
+            result.Add(json.Substring(start).Trim());
+        return result;
+    }
+
+    static bool CompareWithExpected(object actual, string expectedJson)
+    {
+        var expected = ParseJson(expectedJson);
+        return DeepEquals(actual, expected);
+    }
+
     static bool DeepEquals(object a, object b)
     {
         if (a == null && b == null) return true;
@@ -71,7 +181,16 @@ public class __TestRunner__
             double da = Convert.ToDouble(a);
             double db = Convert.ToDouble(b);
             if (double.IsNaN(da) && double.IsNaN(db)) return true;
-            return da == db;
+            return Math.Abs(da - db) < 0.0000001;
+        }
+
+        // Handle tuples as arrays
+        var typeA = a.GetType();
+        if (typeA.IsGenericType && typeA.Name.StartsWith("ValueTuple"))
+        {
+            var fields = typeA.GetFields();
+            var listA = fields.Select(f => f.GetValue(a)).ToList();
+            return DeepEquals(listA, b);
         }
 
         // Handle arrays/lists
@@ -105,6 +224,10 @@ public class __TestRunner__
             return true;
         }
 
+        // String comparison
+        if (a is string || b is string)
+            return a.ToString() == b.ToString();
+
         return a.Equals(b);
     }
 
@@ -115,20 +238,31 @@ public class __TestRunner__
                o is float || o is double || o is decimal;
     }
 
+    static string FormatResult(int index, string actual, bool passed, string error)
+    {
+        var sb = new StringBuilder();
+        sb.Append("{");
+        sb.Append("\\"index\\":" + index);
+        sb.Append(",\\"actual\\":" + actual);
+        sb.Append(",\\"passed\\":" + (passed ? "true" : "false"));
+        sb.Append(",\\"error\\":" + (error == null ? "null" : "\\"" + error.Replace("\\\\", "\\\\\\\\").Replace("\\"", "\\\\\\"") + "\\""));
+        sb.Append("}");
+        return sb.ToString();
+    }
+
     public static void Main(string[] args)
     {
-        var results = new List<TestResult>();
+        var results = new List<string>();
 
         ${testCalls}
 
-        Console.WriteLine(JsonConvert.SerializeObject(results));
+        Console.WriteLine("[" + string.Join(",", results) + "]");
     }
 }
 `;
 
         return {
             files: [
-                mainFile,
                 { name: '__TestRunner__.cs', content: runnerCode.trim() }
             ],
             entryPoint: '__TestRunner__.cs',

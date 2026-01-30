@@ -1,6 +1,7 @@
 const PythonGenerator = require('./python');
 const JavaScriptGenerator = require('./javascript');
 const JavaGenerator = require('./java');
+const CGenerator = require('./c');
 const CppGenerator = require('./cpp');
 const CSharpGenerator = require('./csharp');
 const GoGenerator = require('./go');
@@ -31,6 +32,9 @@ const generators = {
 
     // Java family
     java: new JavaGenerator(),
+
+    // C family
+    c: new CGenerator(),
 
     // C++ family
     cpp: new CppGenerator(),
@@ -113,6 +117,7 @@ module.exports = {
     PythonGenerator,
     JavaScriptGenerator,
     JavaGenerator,
+    CGenerator,
     CppGenerator,
     CSharpGenerator,
     GoGenerator,

@@ -30,14 +30,21 @@ class CppGenerator extends BaseGenerator {
             const callCode = tc.call;
             return `
     {
+        json result;
+        result["index"] = ${i};
         try {
             auto actual = ${callCode};
             auto expected = json::parse("${expectedJson}");
             bool passed = compareResults(actual, expected);
-            results.push_back({{"index", ${i}}, {"actual", actual}, {"passed", passed}, {"error", nullptr}});
+            result["actual"] = actual;
+            result["passed"] = passed;
+            result["error"] = nullptr;
         } catch (const std::exception& e) {
-            results.push_back({{"index", ${i}}, {"actual", nullptr}, {"passed", false}, {"error", e.what()}});
+            result["actual"] = nullptr;
+            result["passed"] = false;
+            result["error"] = e.what();
         }
+        results.push_back(result);
     }`;
         }).join('\n');
 
