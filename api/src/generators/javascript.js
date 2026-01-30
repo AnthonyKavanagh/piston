@@ -23,6 +23,19 @@ class JavaScriptGenerator extends BaseGenerator {
         const runnerCode = `
 const fs = require('fs');
 
+// Capture console output from user code to prevent it from breaking JSON output
+const __capturedLogs__ = [];
+const __originalConsole__ = {
+    log: console.log.bind(console),
+    warn: console.warn.bind(console),
+    error: console.error.bind(console),
+    info: console.info.bind(console)
+};
+console.log = (...args) => __capturedLogs__.push({ type: 'log', args });
+console.warn = (...args) => __capturedLogs__.push({ type: 'warn', args });
+console.error = (...args) => __capturedLogs__.push({ type: 'error', args });
+console.info = (...args) => __capturedLogs__.push({ type: 'info', args });
+
 // Load user code
 ${mainFile.content}
 
@@ -111,7 +124,9 @@ for (let i = 0; i < testCases.length; i++) {
     }
 }
 
-console.log(JSON.stringify(results));
+// Restore original console and output results
+// Use process.stdout.write to ensure clean JSON output
+process.stdout.write(JSON.stringify(results));
 `;
 
         return {

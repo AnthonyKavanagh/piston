@@ -270,6 +270,39 @@ router.post('/execute', async (req, res) => {
 });
 
 /**
+ * Try to extract JSON array from output that may contain extra content
+ * This handles cases where user code outputs content before/after the JSON results
+ */
+function extractJsonArray(output) {
+    // First try direct parsing
+    try {
+        const parsed = JSON.parse(output);
+        if (Array.isArray(parsed)) {
+            return parsed;
+        }
+    } catch (e) {
+        // Continue to extraction logic
+    }
+
+    // Try to find JSON array in the output
+    // Look for the pattern [{ ... }]
+    const jsonArrayMatch = output.match(/\[[\s\S]*\]/);
+    if (jsonArrayMatch) {
+        try {
+            const parsed = JSON.parse(jsonArrayMatch[0]);
+            if (Array.isArray(parsed)) {
+                return parsed;
+            }
+        } catch (e) {
+            // Failed to parse extracted content
+        }
+    }
+
+    // If nothing works, return null
+    return null;
+}
+
+/**
  * Validate test cases for the testCompile endpoint
  * Note: call expressions are passed directly to the language runtime (pass-through mode)
  * This supports language-specific features like Python lambdas, list comprehensions, etc.
@@ -420,10 +453,11 @@ router.post('/testCompile', async (req, res) => {
                     throw new Error('Empty output from test runner');
                 }
 
-                const output = JSON.parse(trimmedOutput);
+                // Try to extract JSON array from output (handles extra content from user code)
+                const output = extractJsonArray(trimmedOutput);
 
-                if (!Array.isArray(output)) {
-                    throw new Error('Test runner output is not an array');
+                if (!output) {
+                    throw new Error('Could not find valid JSON array in test runner output');
                 }
 
                 testResults = output.map((r, i) => ({

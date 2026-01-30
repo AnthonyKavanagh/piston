@@ -23,6 +23,13 @@ class RubyGenerator extends BaseGenerator {
 
         const runnerCode = `
 require 'json'
+require 'stringio'
+
+# Capture stdout from user code to prevent it from breaking JSON output
+$__captured_output__ = StringIO.new
+$__original_stdout__ = $stdout
+$stdout = $__captured_output__
+
 require_relative '${moduleName}'
 
 def deep_equals(a, b)
@@ -117,7 +124,10 @@ test_cases.each_with_index do |tc, i|
   end
 end
 
-puts JSON.generate(results)
+# Restore stdout and output results
+$stdout = $__original_stdout__
+$stdout.write(JSON.generate(results))
+$stdout.flush
 `;
 
         return {

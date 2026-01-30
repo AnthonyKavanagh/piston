@@ -25,8 +25,15 @@ class PythonGenerator extends BaseGenerator {
 import json
 import sys
 import math
+import io
+import ast
 
 sys.path.insert(0, '.')
+
+# Capture stdout from user code to prevent it from breaking JSON output
+__captured_output__ = io.StringIO()
+__original_stdout__ = sys.stdout
+sys.stdout = __captured_output__
 
 from ${moduleName} import *
 
@@ -43,23 +50,18 @@ def deep_equals(a, b):
         if math.isnan(a) and math.isnan(b):
             return True
 
+    # Lists and tuples - treat as equivalent
+    if isinstance(a, (list, tuple)) and isinstance(b, (list, tuple)):
+        if len(a) != len(b):
+            return False
+        return all(deep_equals(x, y) for x, y in zip(a, b))
+
     # Type check with numeric flexibility
     if type(a) != type(b):
         # Allow int/float comparison
         if isinstance(a, (int, float)) and isinstance(b, (int, float)):
             return a == b
-        # Allow list/tuple comparison
-        if isinstance(a, (list, tuple)) and isinstance(b, (list, tuple)):
-            if len(a) != len(b):
-                return False
-            return all(deep_equals(x, y) for x, y in zip(a, b))
         return False
-
-    # Lists and tuples
-    if isinstance(a, (list, tuple)):
-        if len(a) != len(b):
-            return False
-        return all(deep_equals(x, y) for x, y in zip(a, b))
 
     # Dictionaries
     if isinstance(a, dict):
@@ -106,7 +108,13 @@ def convert_expected(val):
     if isinstance(val, (int, float)):
         return val
     if isinstance(val, str):
-        return val
+        # Try to parse as Python literal (handles tuples, lists, etc.)
+        try:
+            parsed = ast.literal_eval(val)
+            return parsed
+        except (ValueError, SyntaxError):
+            # Not a valid Python literal, treat as regular string
+            return val
     if isinstance(val, list):
         return [convert_expected(v) for v in val]
     if isinstance(val, dict):
@@ -143,7 +151,10 @@ for i, tc in enumerate(test_cases):
             'error': f"{type(e).__name__}: {str(e)}"
         })
 
-print(json.dumps(results))
+# Restore stdout and output results
+sys.stdout = __original_stdout__
+sys.stdout.write(json.dumps(results))
+sys.stdout.flush()
 `;
 
         return {
