@@ -463,7 +463,9 @@ router.post('/testCompile', async (req, res) => {
                 testResults = output.map((r, i) => ({
                     index: r.index ?? i,
                     call: testCases[i]?.call || '',
-                    expected: testCases[i]?.expected,
+                    // Use parsed expected (expected_serialized) from runner, not raw input
+                    // This shows what the backend actually compared against
+                    expected: r.expected_serialized ?? testCases[i]?.expected,
                     actual: r.actual,
                     passed: r.passed === true,
                     error: r.error || null,
