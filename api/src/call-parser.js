@@ -1,111 +1,53 @@
 const acorn = require('acorn');
 
 /**
- * Convert Python tuple syntax to JavaScript array syntax
- * e.g., [(1, "a"), (2, "b")] -> [[1, "a"], [2, "b"]]
- * Uses a stack to properly track function calls vs tuples
+ * PASS-THROUGH MODE: Call expressions are passed unchanged to the language runtime.
+ * NO conversion of Python tuples to arrays - that would corrupt type information.
+ * The generators handle language-specific syntax natively using eval().
  */
-function convertPythonTuplesToArrays(str) {
-    let result = '';
-    let i = 0;
-    let inString = false;
-    let stringChar = '';
-    // Stack to track: 'func' for function call parens, 'tuple' for converted tuples, 'array' for original arrays
-    const stack = [];
-
-    while (i < str.length) {
-        const char = str[i];
-        const prevChar = i > 0 ? str[i - 1] : '';
-
-        // Track string boundaries
-        if ((char === '"' || char === "'") && prevChar !== '\\') {
-            if (!inString) {
-                inString = true;
-                stringChar = char;
-            } else if (char === stringChar) {
-                inString = false;
-            }
-            result += char;
-            i++;
-            continue;
-        }
-
-        if (!inString) {
-            if (char === '(') {
-                // Check if this is a function call by looking backwards in original string
-                let j = i - 1;
-                while (j >= 0 && /\s/.test(str[j])) j--;
-
-                if (j >= 0 && /[a-zA-Z0-9_\)]/.test(str[j])) {
-                    // It's a function call, keep as '('
-                    result += '(';
-                    stack.push('func');
-                } else {
-                    // It's a tuple, convert to '['
-                    result += '[';
-                    stack.push('tuple');
-                }
-                i++;
-                continue;
-            }
-
-            if (char === ')') {
-                // Pop from stack to determine what we're closing
-                const type = stack.pop();
-                if (type === 'func') {
-                    result += ')';
-                } else {
-                    // tuple -> close as array
-                    result += ']';
-                }
-                i++;
-                continue;
-            }
-
-            if (char === '[') {
-                result += '[';
-                stack.push('array');
-                i++;
-                continue;
-            }
-
-            if (char === ']') {
-                stack.pop(); // Should be 'array'
-                result += ']';
-                i++;
-                continue;
-            }
-        }
-
-        result += char;
-        i++;
-    }
-
-    return result;
-}
 
 /**
  * Parse a JavaScript-like call expression into structured data
  * e.g., "compute({a: 1, b: 2}, 5)" -> { function: "compute", args: [{a: 1, b: 2}, 5] }
- * Also supports Python tuple syntax which gets converted to arrays
+ *
+ * NOTE: This parser is primarily used for extracting function names and arguments
+ * for languages that don't support direct eval (like C++, Java).
+ * For Python/JavaScript, the call string is passed directly to eval().
+ *
+ * IMPORTANT: Python tuples are NOT converted to arrays. The raw call string
+ * is preserved and passed to the language runtime for native evaluation.
  */
 function parseCallExpression(callStr) {
     if (!callStr || typeof callStr !== 'string') {
         throw new Error('Call expression must be a non-empty string');
     }
 
-    // Convert Python tuples to JavaScript arrays
-    const jsCallStr = convertPythonTuplesToArrays(callStr.trim());
+    const trimmed = callStr.trim();
 
+    // For pass-through mode, we also store the raw call string
+    // This allows generators to use eval() directly with the original syntax
     let ast;
     try {
-        ast = acorn.parseExpressionAt(jsCallStr, 0, { ecmaVersion: 2020 });
+        // Try to parse as JavaScript (works for most C-style function calls)
+        ast = acorn.parseExpressionAt(trimmed, 0, { ecmaVersion: 2020 });
     } catch (e) {
-        throw new Error(`Failed to parse call expression: ${e.message}`);
+        // If parsing fails (e.g., Python-specific syntax), return a minimal result
+        // The generator should use the raw call string instead
+        return {
+            raw: trimmed,
+            function: null,
+            args: [],
+            parseError: `Failed to parse call expression: ${e.message}. Use raw call string for eval-based execution.`
+        };
     }
 
     if (ast.type !== 'CallExpression') {
-        throw new Error(`Expected a function call, got: ${ast.type}`);
+        return {
+            raw: trimmed,
+            function: null,
+            args: [],
+            parseError: `Expected a function call, got: ${ast.type}`
+        };
     }
 
     // Handle both simple identifiers and member expressions (e.g., obj.method())
@@ -116,18 +58,31 @@ function parseCallExpression(callStr) {
         // For method calls like obj.method(), we need the full path
         functionName = extractMemberExpression(ast.callee);
     } else {
-        throw new Error(`Unsupported callee type: ${ast.callee.type}`);
+        return {
+            raw: trimmed,
+            function: null,
+            args: [],
+            parseError: `Unsupported callee type: ${ast.callee.type}`
+        };
     }
 
-    const args = ast.arguments.map((arg, index) => {
+    const args = [];
+    for (const [index, arg] of ast.arguments.entries()) {
         try {
-            return evalASTNode(arg);
+            args.push(evalASTNode(arg));
         } catch (e) {
-            throw new Error(`Failed to evaluate argument ${index}: ${e.message}`);
+            // If argument evaluation fails, return partial result with raw string
+            return {
+                raw: trimmed,
+                function: functionName,
+                args: args,
+                parseError: `Failed to evaluate argument ${index}: ${e.message}`
+            };
         }
-    });
+    }
 
     return {
+        raw: trimmed,
         function: functionName,
         args: args
     };

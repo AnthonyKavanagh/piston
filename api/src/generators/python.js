@@ -5,6 +5,11 @@ const BaseGenerator = require('./base');
  *
  * PASS-THROUGH MODE: Call expressions are passed directly to Python's eval()
  * This supports all Python syntax including lambdas, list comprehensions, f-strings, etc.
+ *
+ * STRICT TYPE COMPARISON:
+ * - tuple ≠ list (even with same elements)
+ * - int ≠ float (1 ≠ 1.0)
+ * - Type-preserving serialization (tuples stay tuples in output)
  */
 class PythonGenerator extends BaseGenerator {
     constructor() {
@@ -26,7 +31,23 @@ import json
 import sys
 import math
 import io
-import ast
+
+# Comprehensive stdlib imports for challenges
+from collections import Counter, defaultdict, deque, OrderedDict, namedtuple, ChainMap
+from itertools import permutations, combinations, combinations_with_replacement, product, chain, groupby, accumulate, starmap, takewhile, dropwhile, filterfalse, islice, cycle, repeat, zip_longest
+from functools import reduce, partial, lru_cache, cmp_to_key
+from operator import add, sub, mul, truediv, floordiv, mod, pow, neg, abs, itemgetter, attrgetter
+from heapq import heappush, heappop, heapify, nlargest, nsmallest, heappushpop, heapreplace
+from bisect import bisect_left, bisect_right, insort_left, insort_right
+from copy import copy, deepcopy
+from string import ascii_lowercase, ascii_uppercase, ascii_letters, digits, punctuation
+from re import match, search, findall, sub as re_sub, split as re_split, compile as re_compile
+from random import randint, random, choice, shuffle, sample, seed
+from statistics import mean, median, mode, stdev, variance
+from decimal import Decimal, ROUND_HALF_UP, ROUND_DOWN, ROUND_UP
+from fractions import Fraction
+from datetime import datetime, date, time, timedelta
+from typing import List, Dict, Set, Tuple, Optional, Union, Any, Callable
 
 sys.path.insert(0, '.')
 
@@ -38,30 +59,38 @@ sys.stdout = __captured_output__
 from ${moduleName} import *
 
 def deep_equals(a, b):
-    """Deep equality comparison that handles various Python types"""
+    """
+    STRICT deep equality comparison - NO type coercion
+    - tuple ≠ list (even with same elements)
+    - int ≠ float (1 ≠ 1.0)
+    - set ≠ frozenset
+    """
     # Handle None
     if a is None and b is None:
         return True
     if a is None or b is None:
         return False
 
-    # Handle NaN
+    # Handle NaN (only float NaN equals float NaN)
     if isinstance(a, float) and isinstance(b, float):
         if math.isnan(a) and math.isnan(b):
             return True
 
-    # Lists and tuples - treat as equivalent
-    if isinstance(a, (list, tuple)) and isinstance(b, (list, tuple)):
+    # STRICT type check - no coercion
+    if type(a) != type(b):
+        return False
+
+    # Lists - must be lists (not tuples)
+    if isinstance(a, list):
         if len(a) != len(b):
             return False
         return all(deep_equals(x, y) for x, y in zip(a, b))
 
-    # Type check with numeric flexibility
-    if type(a) != type(b):
-        # Allow int/float comparison
-        if isinstance(a, (int, float)) and isinstance(b, (int, float)):
-            return a == b
-        return False
+    # Tuples - must be tuples (not lists)
+    if isinstance(a, tuple):
+        if len(a) != len(b):
+            return False
+        return all(deep_equals(x, y) for x, y in zip(a, b))
 
     # Dictionaries
     if isinstance(a, dict):
@@ -73,52 +102,158 @@ def deep_equals(a, b):
     if isinstance(a, set):
         return a == b
 
-    # Default comparison
+    # Frozensets
+    if isinstance(a, frozenset):
+        return a == b
+
+    # Default comparison (int, float, str, bool, etc.)
+    # int and float are NOT equal even if values match
     return a == b
 
 def serialize(value):
-    """Serialize a Python value to JSON-compatible format"""
+    """
+    TYPE-PRESERVING serialization to JSON-compatible format
+    - Tuples are serialized with type marker: {"__type__": "tuple", "value": [...]}
+    - Sets are serialized with type marker: {"__type__": "set", "value": [...]}
+    - Frozensets are serialized with type marker: {"__type__": "frozenset", "value": [...]}
+    """
     if value is None:
         return None
     if isinstance(value, bool):
         return value
-    if isinstance(value, (int, float)):
+    if isinstance(value, int):
+        # Distinguish int from float
+        return {"__type__": "int", "value": value}
+    if isinstance(value, float):
         if math.isnan(value):
-            return "NaN"
+            return {"__type__": "float", "value": "NaN"}
         if math.isinf(value):
-            return "Infinity" if value > 0 else "-Infinity"
-        return value
+            return {"__type__": "float", "value": "Infinity" if value > 0 else "-Infinity"}
+        return {"__type__": "float", "value": value}
     if isinstance(value, str):
         return value
-    if isinstance(value, (list, tuple)):
+    if isinstance(value, tuple):
+        return {"__type__": "tuple", "value": [serialize(v) for v in value]}
+    if isinstance(value, list):
         return [serialize(v) for v in value]
     if isinstance(value, dict):
-        return {str(k): serialize(v) for k, v in value.items()}
+        return {"__type__": "dict", "value": {str(k): serialize(v) for k, v in value.items()}}
     if isinstance(value, set):
-        return sorted([serialize(v) for v in value], key=lambda x: (type(x).__name__, str(x)))
+        return {"__type__": "set", "value": sorted([serialize(v) for v in value], key=lambda x: str(x))}
+    if isinstance(value, frozenset):
+        return {"__type__": "frozenset", "value": sorted([serialize(v) for v in value], key=lambda x: str(x))}
+    if isinstance(value, (Counter, defaultdict, OrderedDict)):
+        return {"__type__": type(value).__name__, "value": {str(k): serialize(v) for k, v in value.items()}}
+    if isinstance(value, deque):
+        return {"__type__": "deque", "value": [serialize(v) for v in value]}
     # For other types, try to convert to string
-    return str(value)
+    return {"__type__": type(value).__name__, "value": str(value)}
+
+def parse_expected_value(val):
+    """
+    Parse raw expected value from frontend.
+    ALL PARSING LOGIC IS HERE IN BACKEND - frontend passes raw values.
+    Handles: JSON, Python literals (True/False/None), tuples, numbers, special values
+    """
+    import re
+
+    # If not a string, it's already parsed (from JSON) - convert it
+    if not isinstance(val, str):
+        return convert_expected(val)
+
+    trimmed = val.strip()
+
+    # Try JSON parse first
+    try:
+        parsed = json.loads(trimmed)
+        return convert_expected(parsed)
+    except (json.JSONDecodeError, ValueError):
+        pass
+
+    # Handle Python special values
+    if trimmed == 'True':
+        return True
+    if trimmed == 'False':
+        return False
+    if trimmed == 'None':
+        return None
+
+    # Handle JavaScript special values (for cross-language compat)
+    if trimmed == 'undefined':
+        return None  # Python has no undefined, use None
+    if trimmed == 'NaN':
+        return float('nan')
+    if trimmed == 'Infinity':
+        return float('inf')
+    if trimmed == '-Infinity':
+        return float('-inf')
+
+    # Handle integers
+    if re.match(r'^-?\\d+$', trimmed):
+        return int(trimmed)
+
+    # Handle floats
+    if re.match(r'^-?\\d*\\.\\d+$', trimmed) or re.match(r'^-?\\d+\\.\\d*$', trimmed):
+        return float(trimmed)
+
+    # Try Python literal eval for tuples, sets, etc.
+    # This is SAFE because we're in a sandboxed environment
+    try:
+        import ast
+        parsed = ast.literal_eval(trimmed)
+        return parsed
+    except (ValueError, SyntaxError):
+        pass
+
+    # Return as string (preserve original value including whitespace)
+    return val
 
 def convert_expected(val):
-    """Convert JSON expected value to Python equivalent for comparison"""
+    """
+    Convert JSON expected value to Python equivalent for comparison
+    Handles type markers from serialization
+    """
     if val is None:
         return None
     if isinstance(val, bool):
         return val
+    if isinstance(val, dict):
+        # Check for type markers
+        if "__type__" in val and "value" in val:
+            t = val["__type__"]
+            v = val["value"]
+            if t == "tuple":
+                return tuple(convert_expected(x) for x in v)
+            if t == "set":
+                return set(convert_expected(x) for x in v)
+            if t == "frozenset":
+                return frozenset(convert_expected(x) for x in v)
+            if t == "int":
+                return int(v)
+            if t == "float":
+                if v == "NaN":
+                    return float('nan')
+                if v == "Infinity":
+                    return float('inf')
+                if v == "-Infinity":
+                    return float('-inf')
+                return float(v)
+            if t == "dict":
+                return {k: convert_expected(x) for k, x in v.items()}
+            if t == "deque":
+                return deque(convert_expected(x) for x in v)
+            if t == "Counter":
+                return Counter({k: convert_expected(x) for k, x in v.items()})
+            if t == "undefined":
+                return None  # Python has no undefined
+        # Regular dict without type marker
+        return {k: convert_expected(v) for k, v in val.items()}
+    if isinstance(val, list):
+        return [convert_expected(v) for v in val]
     if isinstance(val, (int, float)):
         return val
     if isinstance(val, str):
-        # Try to parse as Python literal (handles tuples, lists, etc.)
-        try:
-            parsed = ast.literal_eval(val)
-            return parsed
-        except (ValueError, SyntaxError):
-            # Not a valid Python literal, treat as regular string
-            return val
-    if isinstance(val, list):
-        return [convert_expected(v) for v in val]
-    if isinstance(val, dict):
-        return {k: convert_expected(v) for k, v in val.items()}
+        return val
     return val
 
 # Read test cases from stdin
@@ -131,15 +266,16 @@ for i, tc in enumerate(test_cases):
         # This supports all Python syntax: lambdas, list comprehensions, f-strings, etc.
         actual = eval(tc['call'])
 
-        # Convert expected value from JSON to Python
-        expected = convert_expected(tc['expected'])
+        # Parse expected value from raw input (ALL PARSING IN BACKEND)
+        expected = parse_expected_value(tc['expected'])
 
-        # Compare with expected
+        # STRICT comparison - no type coercion
         passed = deep_equals(actual, expected)
 
         results.append({
             'index': i,
             'actual': serialize(actual),
+            'expected_serialized': serialize(expected),
             'passed': passed,
             'error': None
         })
@@ -147,6 +283,7 @@ for i, tc in enumerate(test_cases):
         results.append({
             'index': i,
             'actual': None,
+            'expected_serialized': None,
             'passed': False,
             'error': f"{type(e).__name__}: {str(e)}"
         })
