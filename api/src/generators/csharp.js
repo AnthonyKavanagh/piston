@@ -23,6 +23,43 @@ class CSharpGenerator extends BaseGenerator {
             .replace(/\t/g, '\\t');
     }
 
+    /**
+     * Parse expected value from frontend.
+     * If it's a string that looks like JSON array/object, parse it.
+     */
+    parseExpectedValue(expected) {
+        if (typeof expected !== 'string') {
+            return expected;
+        }
+
+        const trimmed = expected.trim();
+
+        // If it looks like a JSON array or object, try to parse it
+        if ((trimmed.startsWith('[') && trimmed.endsWith(']')) ||
+            (trimmed.startsWith('{') && trimmed.endsWith('}'))) {
+            try {
+                return JSON.parse(trimmed);
+            } catch (e) {
+                // Not valid JSON, keep as string
+            }
+        }
+
+        // Handle special values
+        if (trimmed === 'true') return true;
+        if (trimmed === 'false') return false;
+        if (trimmed === 'null') return null;
+
+        // Try to parse as number
+        if (/^-?\d+$/.test(trimmed)) {
+            return parseInt(trimmed, 10);
+        }
+        if (/^-?\d*\.?\d+$/.test(trimmed)) {
+            return parseFloat(trimmed);
+        }
+
+        return expected;
+    }
+
     generateRunner(userFiles, testCases) {
         const mainFile = userFiles[0];
 
@@ -40,7 +77,9 @@ class CSharpGenerator extends BaseGenerator {
 
         // Generate test method calls - call expressions are embedded directly
         const testCalls = testCases.map((tc, i) => {
-            const expectedJson = this.escapeCSharp(JSON.stringify(tc.expected));
+            // Parse expected value - if it's a string like "[[1,1],[2,2]]", parse it as array
+            const parsedExpected = this.parseExpectedValue(tc.expected);
+            const expectedJson = this.escapeCSharp(JSON.stringify(parsedExpected));
 
             // Check if call already has a class prefix (e.g., "Solution.Method" or "MyClass.Method")
             // A bare function call starts with a letter and has '(' without a '.' before it

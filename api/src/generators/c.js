@@ -23,17 +23,53 @@ class CGenerator extends BaseGenerator {
             .replace(/\t/g, '\\t');
     }
 
+    /**
+     * Parse expected value from frontend.
+     * If it's a string that looks like JSON array/object, parse it.
+     */
+    parseExpectedValue(expected) {
+        if (typeof expected !== 'string') {
+            return expected;
+        }
+
+        const trimmed = expected.trim();
+
+        // If it looks like a JSON array or object, try to parse it
+        if ((trimmed.startsWith('[') && trimmed.endsWith(']')) ||
+            (trimmed.startsWith('{') && trimmed.endsWith('}'))) {
+            try {
+                return JSON.parse(trimmed);
+            } catch (e) {
+                // Not valid JSON, keep as string
+            }
+        }
+
+        // Handle special values
+        if (trimmed === 'true') return true;
+        if (trimmed === 'false') return false;
+        if (trimmed === 'null') return null;
+
+        // Try to parse as number
+        if (/^-?\d+$/.test(trimmed)) {
+            return parseInt(trimmed, 10);
+        }
+        if (/^-?\d*\.?\d+$/.test(trimmed)) {
+            return parseFloat(trimmed);
+        }
+
+        return expected;
+    }
+
     generateRunner(userFiles, testCases) {
         const mainFile = userFiles[0];
 
         // Generate test calls - call expressions are embedded directly
         // For C, we need to know the return type, so we'll use a macro-based approach
         const testCalls = testCases.map((tc, i) => {
-            const expectedJson = this.escapeC(JSON.stringify(tc.expected));
+            // Parse expected value first
+            const expected = this.parseExpectedValue(tc.expected);
+            const expectedJson = this.escapeC(JSON.stringify(expected));
             const callCode = tc.call;
-
-            // Determine expected type and generate appropriate comparison
-            const expected = tc.expected;
 
             if (typeof expected === 'number') {
                 if (Number.isInteger(expected)) {

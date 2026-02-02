@@ -127,6 +127,33 @@ function __serialize__(value: any): any {
     return value;
 }
 
+// Parse expected value - if it's a string that looks like JSON, parse it
+function __parseExpected__(val: any): any {
+    if (typeof val !== 'string') return val;
+    const trimmed = val.trim();
+
+    // Try to parse as JSON array or object
+    if ((trimmed.startsWith('[') && trimmed.endsWith(']')) ||
+        (trimmed.startsWith('{') && trimmed.endsWith('}'))) {
+        try { return JSON.parse(trimmed); } catch {}
+    }
+
+    // Handle special values
+    if (trimmed === 'true') return true;
+    if (trimmed === 'false') return false;
+    if (trimmed === 'null') return null;
+    if (trimmed === 'undefined') return undefined;
+    if (trimmed === 'NaN') return NaN;
+    if (trimmed === 'Infinity') return Infinity;
+    if (trimmed === '-Infinity') return -Infinity;
+
+    // Try to parse as number
+    if (/^-?\\d+$/.test(trimmed)) return parseInt(trimmed, 10);
+    if (/^-?\\d*\\.\\d+$/.test(trimmed)) return parseFloat(trimmed);
+
+    return val;
+}
+
 // Test cases embedded directly
 const __testCases__: any[] = ${testDataJson};
 const __results__: any[] = [];
@@ -135,10 +162,12 @@ for (let i = 0; i < __testCases__.length; i++) {
     const tc = __testCases__[i];
     try {
         const actual = eval(tc.call);
-        const passed = __deepEquals__(actual, tc.expected);
+        const expected = __parseExpected__(tc.expected);
+        const passed = __deepEquals__(actual, expected);
         __results__.push({
             index: i,
             actual: __serialize__(actual),
+            expected_serialized: __serialize__(expected),
             passed,
             error: null
         });
@@ -146,6 +175,7 @@ for (let i = 0; i < __testCases__.length; i++) {
         __results__.push({
             index: i,
             actual: null,
+            expected_serialized: null,
             passed: false,
             error: (e.name || 'Error') + ': ' + (e.message || String(e))
         });

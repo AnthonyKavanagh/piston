@@ -25,6 +25,49 @@ class JavaGenerator extends BaseGenerator {
             .replace(/\t/g, '\\t');
     }
 
+    /**
+     * Parse expected value from frontend.
+     * If it's a string that looks like JSON array/object, parse it.
+     * Otherwise keep as-is.
+     */
+    parseExpectedValue(expected) {
+        if (typeof expected !== 'string') {
+            return expected;
+        }
+
+        const trimmed = expected.trim();
+
+        // If it looks like a JSON array or object, try to parse it
+        if ((trimmed.startsWith('[') && trimmed.endsWith(']')) ||
+            (trimmed.startsWith('{') && trimmed.endsWith('}'))) {
+            try {
+                return JSON.parse(trimmed);
+            } catch (e) {
+                // Not valid JSON, keep as string
+                return expected;
+            }
+        }
+
+        // Handle special values
+        if (trimmed === 'true') return true;
+        if (trimmed === 'false') return false;
+        if (trimmed === 'null') return null;
+        if (trimmed === 'NaN') return 'NaN';
+        if (trimmed === 'Infinity') return 'Infinity';
+        if (trimmed === '-Infinity') return '-Infinity';
+
+        // Try to parse as number
+        if (/^-?\d+$/.test(trimmed)) {
+            return parseInt(trimmed, 10);
+        }
+        if (/^-?\d*\.?\d+$/.test(trimmed)) {
+            return parseFloat(trimmed);
+        }
+
+        // Keep as string
+        return expected;
+    }
+
     generateRunner(userFiles, testCases) {
         const mainFile = userFiles[0];
 
@@ -41,7 +84,9 @@ class JavaGenerator extends BaseGenerator {
 
         // Generate test method calls - call expressions are embedded directly
         const testCalls = testCases.map((tc, i) => {
-            const expectedJson = this.escapeJava(JSON.stringify(tc.expected));
+            // Parse expected value - if it's a string like "[[1,1],[2,2]]", parse it as array
+            const parsedExpected = this.parseExpectedValue(tc.expected);
+            const expectedJson = this.escapeJava(JSON.stringify(parsedExpected));
 
             // Check if call already has a class prefix
             let callCode = tc.call;
@@ -61,9 +106,9 @@ class JavaGenerator extends BaseGenerator {
                 Object actual = ${callCode};
                 Object expected = parseJson("${expectedJson}");
                 boolean passed = deepEquals(actual, expected);
-                results.add(formatResult(${i}, serialize(actual), passed, null));
+                results.add(formatResult(${i}, serialize(actual), serialize(expected), passed, null));
             } catch (Exception e) {
-                results.add(formatResult(${i}, "null", false, e.getClass().getSimpleName() + ": " + e.getMessage()));
+                results.add(formatResult(${i}, "null", "null", false, e.getClass().getSimpleName() + ": " + e.getMessage()));
             }`;
         }).join('\n');
 
@@ -307,11 +352,12 @@ public class __TestRunner__ {
         return a.equals(b);
     }
 
-    static String formatResult(int index, String actual, boolean passed, String error) {
+    static String formatResult(int index, String actual, String expectedSerialized, boolean passed, String error) {
         StringBuilder sb = new StringBuilder();
         sb.append("{");
         sb.append("\\"index\\":").append(index);
         sb.append(",\\"actual\\":").append(actual);
+        sb.append(",\\"expected_serialized\\":").append(expectedSerialized);
         sb.append(",\\"passed\\":").append(passed);
         sb.append(",\\"error\\":");
         if (error == null) {

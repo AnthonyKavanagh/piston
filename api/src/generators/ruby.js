@@ -95,6 +95,38 @@ def serialize(value)
   end
 end
 
+# Parse expected value - if it's a string that looks like JSON, parse it
+def parse_expected_value(val)
+  return val unless val.is_a?(String)
+  trimmed = val.strip
+
+  # Try to parse as JSON array or object
+  if (trimmed.start_with?('[') && trimmed.end_with?(']')) ||
+     (trimmed.start_with?('{') && trimmed.end_with?('}'))
+    begin
+      return JSON.parse(trimmed)
+    rescue JSON::ParserError
+      # Not valid JSON, continue
+    end
+  end
+
+  # Handle special values
+  return true if trimmed == 'true'
+  return false if trimmed == 'false'
+  return nil if trimmed == 'null' || trimmed == 'nil'
+  return Float::NAN if trimmed == 'NaN'
+  return Float::INFINITY if trimmed == 'Infinity'
+  return -Float::INFINITY if trimmed == '-Infinity'
+
+  # Try to parse as integer
+  return trimmed.to_i if /^-?\\d+$/.match?(trimmed)
+
+  # Try to parse as float
+  return trimmed.to_f if /^-?\\d*\\.\\d+$/.match?(trimmed)
+
+  val
+end
+
 # Read test cases from stdin
 test_cases = JSON.parse(STDIN.read)
 results = []
@@ -105,12 +137,16 @@ test_cases.each_with_index do |tc, i|
     # This supports all Ruby syntax
     actual = eval(tc['call'])
 
+    # Parse expected value from raw input
+    expected = parse_expected_value(tc['expected'])
+
     # Compare with expected
-    passed = deep_equals(actual, tc['expected'])
+    passed = deep_equals(actual, expected)
 
     results << {
       'index' => i,
       'actual' => serialize(actual),
+      'expected_serialized' => serialize(expected),
       'passed' => passed,
       'error' => nil
     }
@@ -118,6 +154,7 @@ test_cases.each_with_index do |tc, i|
     results << {
       'index' => i,
       'actual' => nil,
+      'expected_serialized' => nil,
       'passed' => false,
       'error' => "\#{e.class}: \#{e.message}"
     }

@@ -27,70 +27,111 @@ class CppGenerator extends BaseGenerator {
     }
 
     /**
-     * Convert C++ initializer list syntax to JSON
-     * Examples:
-     *   "{{1,1},{2,2}}" → [[1,1],[2,2]]
-     *   "{1,2,3}" → [1,2,3]
-     *   "{}" → []
+     * Parse expected value from frontend.
+     * Handles:
+     *   - JSON strings like "[[1,1],[2,2]]" → parse as array
+     *   - C++ initializer syntax like "{1,2,3}" → convert to [1,2,3]
+     *   - Plain strings → keep as-is
      */
-    convertCppToJson(value) {
+    parseExpectedValue(value) {
         if (typeof value !== 'string') {
             return value;
         }
 
-        // Check if it looks like C++ initializer list syntax
         const trimmed = value.trim();
-        if (!trimmed.startsWith('{') || !trimmed.endsWith('}')) {
-            return value; // Not C++ syntax, return as-is
+
+        // First, try to parse as JSON directly (handles "[[1,1],[2,2]]" etc.)
+        if (trimmed.startsWith('[') && trimmed.endsWith(']')) {
+            try {
+                return JSON.parse(trimmed);
+            } catch (e) {
+                // Not valid JSON, continue
+            }
         }
 
-        try {
-            // Replace { } with [ ] while preserving strings
-            let result = '';
-            let inString = false;
-            let escapeNext = false;
+        // Try to parse as JSON object
+        if (trimmed.startsWith('{') && trimmed.endsWith('}') && trimmed.includes(':')) {
+            try {
+                return JSON.parse(trimmed);
+            } catch (e) {
+                // Not valid JSON object, might be C++ initializer
+            }
+        }
 
-            for (let i = 0; i < trimmed.length; i++) {
-                const char = trimmed[i];
+        // Handle C++ initializer list syntax: {1,2,3} → [1,2,3]
+        if (trimmed.startsWith('{') && trimmed.endsWith('}')) {
+            try {
+                // Replace { } with [ ] while preserving strings
+                let result = '';
+                let inString = false;
+                let escapeNext = false;
 
-                if (escapeNext) {
-                    result += char;
-                    escapeNext = false;
-                    continue;
-                }
+                for (let i = 0; i < trimmed.length; i++) {
+                    const char = trimmed[i];
 
-                if (char === '\\') {
-                    result += char;
-                    escapeNext = true;
-                    continue;
-                }
+                    if (escapeNext) {
+                        result += char;
+                        escapeNext = false;
+                        continue;
+                    }
 
-                if (char === '"') {
-                    inString = !inString;
-                    result += char;
-                    continue;
-                }
+                    if (char === '\\') {
+                        result += char;
+                        escapeNext = true;
+                        continue;
+                    }
 
-                if (!inString) {
-                    if (char === '{') {
-                        result += '[';
-                    } else if (char === '}') {
-                        result += ']';
+                    if (char === '"') {
+                        inString = !inString;
+                        result += char;
+                        continue;
+                    }
+
+                    if (!inString) {
+                        if (char === '{') {
+                            result += '[';
+                        } else if (char === '}') {
+                            result += ']';
+                        } else {
+                            result += char;
+                        }
                     } else {
                         result += char;
                     }
-                } else {
-                    result += char;
                 }
-            }
 
-            // Try to parse as JSON
-            const parsed = JSON.parse(result);
-            return parsed;
-        } catch (e) {
-            // If conversion fails, return original value
-            return value;
+                // Try to parse as JSON
+                const parsed = JSON.parse(result);
+                return parsed;
+            } catch (e) {
+                // If conversion fails, return original value
+            }
         }
+
+        // Handle special values
+        if (trimmed === 'true') return true;
+        if (trimmed === 'false') return false;
+        if (trimmed === 'null') return null;
+        if (trimmed === 'NaN') return 'NaN';
+        if (trimmed === 'Infinity') return 'Infinity';
+        if (trimmed === '-Infinity') return '-Infinity';
+
+        // Try to parse as number
+        if (/^-?\d+$/.test(trimmed)) {
+            return parseInt(trimmed, 10);
+        }
+        if (/^-?\d*\.?\d+$/.test(trimmed)) {
+            return parseFloat(trimmed);
+        }
+
+        return value;
+    }
+
+    /**
+     * Convert C++ initializer list syntax to JSON (legacy alias)
+     */
+    convertCppToJson(value) {
+        return this.parseExpectedValue(value);
     }
 
     /**
