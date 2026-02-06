@@ -500,6 +500,105 @@ function serialize(value) {
 }
 
 /**
+ * Pre-process string to convert JS constructors to JSON-safe __type__ markers
+ * Handles: new Set([...]), new Map([...]), undefined
+ */
+function preprocessJsConstructors(str) {
+    let result = str;
+
+    // Replace standalone undefined with placeholder (not inside quotes)
+    // Match undefined that's not inside a string
+    result = result.replace(/\\bundefined\\b/g, '{"__type__":"undefined"}');
+
+    // Replace new Set() with no arguments
+    result = result.replace(/new\\s+Set\\s*\\(\\s*\\)/g, '{"__type__":"Set","value":[]}');
+
+    // Replace new Map() with no arguments
+    result = result.replace(/new\\s+Map\\s*\\(\\s*\\)/g, '{"__type__":"Map","value":[]}');
+
+    // Replace new Set([...]) - need to handle nested brackets
+    // Use a function to properly extract the array content
+    result = replaceSetConstructor(result);
+    result = replaceMapConstructor(result);
+
+    return result;
+}
+
+/**
+ * Replace new Set([...]) with {"__type__":"Set","value":[...]}
+ */
+function replaceSetConstructor(str) {
+    const pattern = /new\\s+Set\\s*\\(\\s*\\[/g;
+    let result = str;
+    let match;
+
+    while ((match = pattern.exec(result)) !== null) {
+        const startIdx = match.index;
+        const bracketStart = result.indexOf('[', startIdx);
+
+        // Find matching closing bracket
+        let depth = 1;
+        let i = bracketStart + 1;
+        while (i < result.length && depth > 0) {
+            if (result[i] === '[') depth++;
+            else if (result[i] === ']') depth--;
+            i++;
+        }
+
+        if (depth === 0) {
+            // Find the closing paren after ]
+            let j = i;
+            while (j < result.length && /\\s/.test(result[j])) j++;
+            if (result[j] === ')') {
+                const arrayContent = result.slice(bracketStart + 1, i - 1);
+                const replacement = '{"__type__":"Set","value":[' + arrayContent + ']}';
+                result = result.slice(0, startIdx) + replacement + result.slice(j + 1);
+                pattern.lastIndex = startIdx + replacement.length;
+            }
+        }
+    }
+
+    return result;
+}
+
+/**
+ * Replace new Map([...]) with {"__type__":"Map","value":[...]}
+ */
+function replaceMapConstructor(str) {
+    const pattern = /new\\s+Map\\s*\\(\\s*\\[/g;
+    let result = str;
+    let match;
+
+    while ((match = pattern.exec(result)) !== null) {
+        const startIdx = match.index;
+        const bracketStart = result.indexOf('[', startIdx);
+
+        // Find matching closing bracket
+        let depth = 1;
+        let i = bracketStart + 1;
+        while (i < result.length && depth > 0) {
+            if (result[i] === '[') depth++;
+            else if (result[i] === ']') depth--;
+            i++;
+        }
+
+        if (depth === 0) {
+            // Find the closing paren after ]
+            let j = i;
+            while (j < result.length && /\\s/.test(result[j])) j++;
+            if (result[j] === ')') {
+                const arrayContent = result.slice(bracketStart + 1, i - 1);
+                const replacement = '{"__type__":"Map","value":[' + arrayContent + ']}';
+                result = result.slice(0, startIdx) + replacement + result.slice(j + 1);
+                pattern.lastIndex = startIdx + replacement.length;
+            }
+        }
+    }
+
+    return result;
+}
+
+/**
  * Parse raw expected value from frontend
  * Handles: JSON, special JS values (NaN, Infinity, undefined), numbers, strings,
  * and constructor calls: new Set([...]), new Map([...])
@@ -526,15 +625,7 @@ function parseExpectedValue(val) {
         }
     }
 
-    // Try JSON parse first (handles arrays, objects, quoted strings, booleans, null, numbers)
-    try {
-        const parsed = JSON.parse(trimmed);
-        return convertExpected(parsed);
-    } catch (e) {
-        // Not valid JSON, continue with special value handling
-    }
-
-    // Handle JavaScript special values
+    // Handle JavaScript special values (standalone)
     if (trimmed === 'undefined') return undefined;
     if (trimmed === 'NaN') return NaN;
     if (trimmed === 'Infinity') return Infinity;
@@ -545,30 +636,57 @@ function parseExpectedValue(val) {
     if (trimmed === 'False') return false;
     if (trimmed === 'None') return null;
 
-    // FIX: Handle new Set([...]) constructor syntax
+    // FIX: Handle empty constructors BEFORE bracket-matching regex
+    if (/^new\\s+Set\\s*\\(\\s*\\)$/.test(trimmed)) return new Set();
+    if (/^new\\s+Map\\s*\\(\\s*\\)$/.test(trimmed)) return new Map();
+
+    // FIX: Handle top-level new Set([...]) constructor syntax
     const setMatch = trimmed.match(/^new\\s+Set\\s*\\(\\s*\\[([\\s\\S]*)\\]\\s*\\)$/);
     if (setMatch) {
         const inner = setMatch[1].trim();
         if (!inner) return new Set();
         try {
-            const elements = JSON.parse('[' + inner + ']');
+            // Pre-process inner content for nested constructors
+            const processed = preprocessJsConstructors(inner);
+            const elements = JSON.parse('[' + processed + ']');
             return new Set(elements.map(convertExpected));
         } catch (e) {
-            // JSON.parse failed - fall through to return as string
+            // JSON.parse failed - fall through
         }
     }
 
-    // FIX: Handle new Map([...]) constructor syntax
+    // FIX: Handle top-level new Map([...]) constructor syntax
     const mapMatch = trimmed.match(/^new\\s+Map\\s*\\(\\s*\\[([\\s\\S]*)\\]\\s*\\)$/);
     if (mapMatch) {
         const inner = mapMatch[1].trim();
         if (!inner) return new Map();
         try {
-            const entries = JSON.parse('[' + inner + ']');
+            // Pre-process inner content for nested constructors
+            const processed = preprocessJsConstructors(inner);
+            const entries = JSON.parse('[' + processed + ']');
             return new Map(entries.map(([k, v]) => [convertExpected(k), convertExpected(v)]));
         } catch (e) {
-            // JSON.parse failed - fall through to return as string
+            // JSON.parse failed - fall through
         }
+    }
+
+    // FIX: Pre-process and try JSON parse for mixed JS/JSON (objects/arrays with constructors)
+    if (trimmed.startsWith('{') || trimmed.startsWith('[')) {
+        try {
+            const processed = preprocessJsConstructors(trimmed);
+            const parsed = JSON.parse(processed);
+            return convertExpected(parsed);
+        } catch (e) {
+            // Pre-processing didn't help - fall through
+        }
+    }
+
+    // Try plain JSON parse (handles arrays, objects, quoted strings, booleans, null, numbers)
+    try {
+        const parsed = JSON.parse(trimmed);
+        return convertExpected(parsed);
+    } catch (e) {
+        // Not valid JSON, continue with special value handling
     }
 
     // Handle integers
@@ -605,7 +723,7 @@ function convertExpected(val) {
             }
             if (t === 'tuple') return val.value.map(convertExpected);  // JS has no tuples, use arrays
             if (t === 'set' || t === 'Set') return new Set(val.value.map(convertExpected));
-            if (t === 'Map') return new Map(val.value.map(([k, v]) => [convertExpected(k), convertExpected(v)]));
+            if (t === 'map' || t === 'Map') return new Map(val.value.map(([k, v]) => [convertExpected(k), convertExpected(v)]));
             if (t === 'int' || t === 'float') return val.value;
             if (t === 'dict') {
                 const result = {};
