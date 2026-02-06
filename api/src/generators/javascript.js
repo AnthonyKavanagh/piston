@@ -382,6 +382,8 @@ ${mainFile.content}
  * - Arrays must be arrays (not array-like objects)
  * - undefined ≠ null
  * - NaN === NaN (special case)
+ * - Set === Set (element comparison, order-independent)
+ * - Map === Map (key-value comparison, order-independent)
  */
 function deepEquals(a, b) {
     // Handle identical values (including undefined === undefined)
@@ -406,6 +408,44 @@ function deepEquals(a, b) {
     if (aIsArray) {
         if (a.length !== b.length) return false;
         return a.every((v, i) => deepEquals(v, b[i]));
+    }
+
+    // FIX: Set comparison - both must be Sets, compare elements (order-independent)
+    const aIsSet = a instanceof Set;
+    const bIsSet = b instanceof Set;
+    if (aIsSet !== bIsSet) return false;
+    if (aIsSet) {
+        if (a.size !== b.size) return false;
+        for (const item of a) {
+            // For primitive items, direct check
+            if (typeof item !== 'object' || item === null) {
+                if (!b.has(item)) return false;
+            } else {
+                // For object items, need deep comparison
+                let found = false;
+                for (const bItem of b) {
+                    if (deepEquals(item, bItem)) {
+                        found = true;
+                        break;
+                    }
+                }
+                if (!found) return false;
+            }
+        }
+        return true;
+    }
+
+    // FIX: Map comparison - both must be Maps, compare key-value pairs
+    const aIsMap = a instanceof Map;
+    const bIsMap = b instanceof Map;
+    if (aIsMap !== bIsMap) return false;
+    if (aIsMap) {
+        if (a.size !== b.size) return false;
+        for (const [key, val] of a) {
+            if (!b.has(key)) return false;
+            if (!deepEquals(val, b.get(key))) return false;
+        }
+        return true;
     }
 
     // Objects
@@ -461,7 +501,8 @@ function serialize(value) {
 
 /**
  * Parse raw expected value from frontend
- * Handles: JSON, special JS values (NaN, Infinity, undefined), numbers, strings
+ * Handles: JSON, special JS values (NaN, Infinity, undefined), numbers, strings,
+ * and constructor calls: new Set([...]), new Map([...])
  * ALL PARSING LOGIC IS HERE - frontend passes raw values
  */
 function parseExpectedValue(val) {
@@ -471,6 +512,19 @@ function parseExpectedValue(val) {
     }
 
     const trimmed = val.trim();
+
+    // FIX: Handle double-quoted strings FIRST (before JSON.parse changes them)
+    // Expected value "42" should be string "42", not number 42
+    if (trimmed.length >= 2 && trimmed[0] === '"' && trimmed[trimmed.length - 1] === '"') {
+        // Check if it's a simple quoted string (not JSON object/array)
+        // Remove outer quotes and unescape
+        try {
+            return JSON.parse(trimmed);
+        } catch (e) {
+            // If JSON parse fails, manually remove quotes
+            return trimmed.slice(1, -1);
+        }
+    }
 
     // Try JSON parse first (handles arrays, objects, quoted strings, booleans, null, numbers)
     try {
@@ -490,6 +544,32 @@ function parseExpectedValue(val) {
     if (trimmed === 'True') return true;
     if (trimmed === 'False') return false;
     if (trimmed === 'None') return null;
+
+    // FIX: Handle new Set([...]) constructor syntax
+    const setMatch = trimmed.match(/^new\\s+Set\\s*\\(\\s*\\[([\\s\\S]*)\\]\\s*\\)$/);
+    if (setMatch) {
+        const inner = setMatch[1].trim();
+        if (!inner) return new Set();
+        try {
+            const elements = JSON.parse('[' + inner + ']');
+            return new Set(elements.map(convertExpected));
+        } catch (e) {
+            // JSON.parse failed - fall through to return as string
+        }
+    }
+
+    // FIX: Handle new Map([...]) constructor syntax
+    const mapMatch = trimmed.match(/^new\\s+Map\\s*\\(\\s*\\[([\\s\\S]*)\\]\\s*\\)$/);
+    if (mapMatch) {
+        const inner = mapMatch[1].trim();
+        if (!inner) return new Map();
+        try {
+            const entries = JSON.parse('[' + inner + ']');
+            return new Map(entries.map(([k, v]) => [convertExpected(k), convertExpected(v)]));
+        } catch (e) {
+            // JSON.parse failed - fall through to return as string
+        }
+    }
 
     // Handle integers
     if (/^-?\\d+$/.test(trimmed)) {
@@ -524,7 +604,7 @@ function convertExpected(val) {
                 return val.value;
             }
             if (t === 'tuple') return val.value.map(convertExpected);  // JS has no tuples, use arrays
-            if (t === 'set') return new Set(val.value.map(convertExpected));
+            if (t === 'set' || t === 'Set') return new Set(val.value.map(convertExpected));
             if (t === 'Map') return new Map(val.value.map(([k, v]) => [convertExpected(k), convertExpected(v)]));
             if (t === 'int' || t === 'float') return val.value;
             if (t === 'dict') {
