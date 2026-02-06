@@ -121,6 +121,13 @@ def serialize(value):
         return None
     if isinstance(value, bool):
         return value
+    # Check Counter/OrderedDict/defaultdict BEFORE dict (they are dict subclasses)
+    if isinstance(value, Counter):
+        return {"__type__": "Counter", "value": {str(k): serialize(v) for k, v in value.items()}}
+    if isinstance(value, OrderedDict):
+        return {"__type__": "OrderedDict", "value": {str(k): serialize(v) for k, v in value.items()}}
+    if isinstance(value, defaultdict):
+        return {"__type__": "defaultdict", "value": {str(k): serialize(v) for k, v in value.items()}}
     if isinstance(value, int):
         # Distinguish int from float
         return {"__type__": "int", "value": value}
@@ -142,8 +149,6 @@ def serialize(value):
         return {"__type__": "set", "value": sorted([serialize(v) for v in value], key=lambda x: str(x))}
     if isinstance(value, frozenset):
         return {"__type__": "frozenset", "value": sorted([serialize(v) for v in value], key=lambda x: str(x))}
-    if isinstance(value, (Counter, defaultdict, OrderedDict)):
-        return {"__type__": type(value).__name__, "value": {str(k): serialize(v) for k, v in value.items()}}
     if isinstance(value, deque):
         return {"__type__": "deque", "value": [serialize(v) for v in value]}
     # For other types, try to convert to string
@@ -153,9 +158,11 @@ def parse_expected_value(val):
     """
     Parse raw expected value from frontend.
     ALL PARSING LOGIC IS HERE IN BACKEND - frontend passes raw values.
-    Handles: JSON, Python literals (True/False/None), tuples, numbers, special values
+    Handles: JSON, Python literals, tuples, numbers, special values,
+    and constructor calls like frozenset(), Counter(), OrderedDict(), deque(), list(range())
     """
     import re
+    import ast
 
     # If not a string, it's already parsed (from JSON) - convert it
     if not isinstance(val, str):
@@ -188,6 +195,95 @@ def parse_expected_value(val):
     if trimmed == '-Infinity':
         return float('-inf')
 
+    # Handle constructor calls BEFORE ast.literal_eval
+    # These patterns extract literals from inside and use ast.literal_eval safely
+
+    # frozenset({...}) or frozenset()
+    if trimmed == 'frozenset()':
+        return frozenset()
+    fs_match = re.match(r'^frozenset\\(\\{(.*)\\}\\)$', trimmed, re.DOTALL)
+    if fs_match:
+        inner = fs_match.group(1).strip()
+        if not inner:
+            return frozenset()
+        try:
+            inner_set = ast.literal_eval('{' + inner + '}')
+            return frozenset(inner_set)
+        except:
+            pass
+
+    # Counter({...}) or Counter()
+    if trimmed == 'Counter()':
+        return Counter()
+    counter_match = re.match(r'^Counter\\(\\{(.*)\\}\\)$', trimmed, re.DOTALL)
+    if counter_match:
+        inner = counter_match.group(1).strip()
+        if not inner:
+            return Counter()
+        try:
+            inner_dict = ast.literal_eval('{' + inner + '}')
+            return Counter(inner_dict)
+        except:
+            pass
+
+    # OrderedDict([...]) or OrderedDict()
+    if trimmed == 'OrderedDict()':
+        return OrderedDict()
+    od_match = re.match(r'^OrderedDict\\(\\[(.*)\\]\\)$', trimmed, re.DOTALL)
+    if od_match:
+        inner = od_match.group(1).strip()
+        if not inner:
+            return OrderedDict()
+        try:
+            inner_list = ast.literal_eval('[' + inner + ']')
+            return OrderedDict(inner_list)
+        except:
+            pass
+
+    # deque([...]) or deque()
+    if trimmed == 'deque()':
+        return deque()
+    deque_match = re.match(r'^deque\\(\\[(.*)\\]\\)$', trimmed, re.DOTALL)
+    if deque_match:
+        inner = deque_match.group(1).strip()
+        if not inner:
+            return deque()
+        try:
+            inner_list = ast.literal_eval('[' + inner + ']')
+            return deque(inner_list)
+        except:
+            pass
+
+    # defaultdict() - note: we can't preserve the default_factory, so just return empty
+    if trimmed == 'defaultdict()':
+        return defaultdict()
+
+    # list(range(N)) or list(range(N, M)) or list(range(N, M, S))
+    range_match = re.match(r'^list\\(range\\(([^)]+)\\)\\)$', trimmed)
+    if range_match:
+        args = range_match.group(1).strip()
+        try:
+            arg_parts = [int(x.strip()) for x in args.split(',')]
+            if len(arg_parts) == 1:
+                return list(range(arg_parts[0]))
+            elif len(arg_parts) == 2:
+                return list(range(arg_parts[0], arg_parts[1]))
+            elif len(arg_parts) == 3:
+                return list(range(arg_parts[0], arg_parts[1], arg_parts[2]))
+        except:
+            pass
+
+    # Safe math expressions: N**M (power operator for large ints)
+    power_match = re.match(r'^(-?\\d+)\\*\\*(-?\\d+)$', trimmed)
+    if power_match:
+        try:
+            base = int(power_match.group(1))
+            exp = int(power_match.group(2))
+            if 0 <= exp <= 1000:
+                return base ** exp
+        except:
+            pass
+
     # Handle integers
     if re.match(r'^-?\\d+$', trimmed):
         return int(trimmed)
@@ -196,11 +292,16 @@ def parse_expected_value(val):
     if re.match(r'^-?\\d*\\.\\d+$', trimmed) or re.match(r'^-?\\d+\\.\\d*$', trimmed):
         return float(trimmed)
 
+    # Normalize JSON-style booleans to Python-style before ast.literal_eval
+    # This handles expected values like "(true, false, null)" or "{true: 1}"
+    normalized = trimmed
+    normalized = re.sub(r'\\btrue\\b', 'True', normalized)
+    normalized = re.sub(r'\\bfalse\\b', 'False', normalized)
+    normalized = re.sub(r'\\bnull\\b', 'None', normalized)
+
     # Try Python literal eval for tuples, sets, etc.
-    # This is SAFE because we're in a sandboxed environment
     try:
-        import ast
-        parsed = ast.literal_eval(trimmed)
+        parsed = ast.literal_eval(normalized)
         return parsed
     except (ValueError, SyntaxError):
         pass
@@ -244,6 +345,10 @@ def convert_expected(val):
                 return deque(convert_expected(x) for x in v)
             if t == "Counter":
                 return Counter({k: convert_expected(x) for k, x in v.items()})
+            if t == "OrderedDict":
+                return OrderedDict((k, convert_expected(x)) for k, x in v.items())
+            if t == "defaultdict":
+                return defaultdict(None, {k: convert_expected(x) for k, x in v.items()})
             if t == "undefined":
                 return None  # Python has no undefined
         # Regular dict without type marker
