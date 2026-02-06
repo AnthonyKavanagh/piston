@@ -3,14 +3,24 @@ const BaseGenerator = require('./base');
 /**
  * C++ test runner generator
  *
- * PASS-THROUGH MODE: Call expressions are embedded directly in generated C++ code.
+ * STDIN-BASED MODE: Expected values are delivered via stdin to avoid double-escaping.
  * The call syntax must be valid C++ (e.g., "add(1, 2)")
  *
  * FEATURES:
  * - Supports std::vector, std::map, std::unordered_map, std::set, std::unordered_set, std::pair
- * - JSON expected values are converted to C++ initializer syntax
+ * - JSON expected values are parsed from stdin at runtime
  * - Comprehensive headers included (safe ones only)
- * - Strict type comparison
+ * - Strict type comparison with int/float/double distinction
+ *
+ * FIXES APPLIED (2026-02-06):
+ * - FIX 1: stdin-based expected value delivery (fixes 16 string escaping tests)
+ * - FIX 2: Float preservation in parseExpectedValue (fixes t17, t18, t88)
+ * - FIX 3: Double-quoted string detection (fixes string coercion)
+ * - FIX 4: std::variant serialization support (fixes t49, t53)
+ * - FIX 5: char serialization as string (fixes t82)
+ * - FIX 6: Empty map {} detection (fixes t16)
+ * - FIX 7: Scientific notation in number regex (fixes t30)
+ * - FIX 8: Type coercion prevention via explicit float markers
  */
 class CppGenerator extends BaseGenerator {
     constructor() {
@@ -27,11 +37,144 @@ class CppGenerator extends BaseGenerator {
     }
 
     /**
+     * Protect float literals from JSON.parse() by replacing them with placeholders.
+     * Returns { modified: string, floatMap: Map<string, string> }
+     *
+     * This scans for float tokens (numbers with . or e/E) OUTSIDE of quoted strings
+     * and replaces them with "__FLOAT_N__" placeholders.
+     */
+    protectFloatLiterals(str) {
+        const floatMap = new Map();
+        let floatIndex = 0;
+        let result = '';
+        let i = 0;
+
+        while (i < str.length) {
+            // Skip over quoted strings entirely
+            if (str[i] === '"') {
+                result += '"';
+                i++;
+                while (i < str.length && str[i] !== '"') {
+                    if (str[i] === '\\' && i + 1 < str.length) {
+                        result += str[i] + str[i + 1];
+                        i += 2;
+                    } else {
+                        result += str[i];
+                        i++;
+                    }
+                }
+                if (i < str.length) {
+                    result += '"';
+                    i++;
+                }
+                continue;
+            }
+
+            // Check for a number token (starts with digit or minus followed by digit)
+            if (/[-\d]/.test(str[i])) {
+                // Capture the full number token
+                let numStart = i;
+                let numStr = '';
+
+                // Optional minus
+                if (str[i] === '-') {
+                    numStr += str[i];
+                    i++;
+                }
+
+                // Digits before decimal
+                while (i < str.length && /\d/.test(str[i])) {
+                    numStr += str[i];
+                    i++;
+                }
+
+                // Optional decimal part
+                if (i < str.length && str[i] === '.') {
+                    numStr += str[i];
+                    i++;
+                    while (i < str.length && /\d/.test(str[i])) {
+                        numStr += str[i];
+                        i++;
+                    }
+                }
+
+                // Optional exponent
+                if (i < str.length && /[eE]/.test(str[i])) {
+                    numStr += str[i];
+                    i++;
+                    if (i < str.length && /[+-]/.test(str[i])) {
+                        numStr += str[i];
+                        i++;
+                    }
+                    while (i < str.length && /\d/.test(str[i])) {
+                        numStr += str[i];
+                        i++;
+                    }
+                }
+
+                // Check if this is a float (has decimal or exponent)
+                const isFloat = numStr.includes('.') || /[eE]/.test(numStr);
+
+                if (isFloat && numStr.length > 0 && /\d/.test(numStr)) {
+                    // Replace with placeholder
+                    const placeholder = `"__FLOAT_${floatIndex}__"`;
+                    floatMap.set(`__FLOAT_${floatIndex}__`, numStr);
+                    floatIndex++;
+                    result += placeholder;
+                } else {
+                    // Keep integer as-is
+                    result += numStr;
+                }
+                continue;
+            }
+
+            // Copy other characters as-is
+            result += str[i];
+            i++;
+        }
+
+        return { modified: result, floatMap };
+    }
+
+    /**
+     * Recursively restore __cppFloat wrappers from placeholders after JSON.parse().
+     */
+    restoreFloatWrappers(value, floatMap) {
+        // Check for placeholder string
+        if (typeof value === 'string' && value.startsWith('__FLOAT_') && value.endsWith('__')) {
+            const original = floatMap.get(value);
+            if (original) {
+                return { __cppFloat: true, value: parseFloat(original), original };
+            }
+        }
+
+        // Recurse into arrays
+        if (Array.isArray(value)) {
+            return value.map(item => this.restoreFloatWrappers(item, floatMap));
+        }
+
+        // Recurse into objects
+        if (value && typeof value === 'object') {
+            const result = {};
+            for (const [k, v] of Object.entries(value)) {
+                result[k] = this.restoreFloatWrappers(v, floatMap);
+            }
+            return result;
+        }
+
+        return value;
+    }
+
+    /**
      * Parse expected value from frontend.
      * Handles:
+     *   - Double-quoted strings like "hello" → string (FIX 3)
      *   - JSON strings like "[[1,1],[2,2]]" → parse as array
      *   - C++ initializer syntax like "{1,2,3}" → convert to [1,2,3]
      *   - Plain strings → keep as-is
+     *   - Float preservation: 42.0 stays float, not integer (FIX 2)
+     *   - Scientific notation: 1e-15 parsed as number (FIX 7)
+     *   - Nested floats in arrays/objects preserved via placeholder pre-pass
      */
     parseExpectedValue(value) {
         if (typeof value !== 'string') {
@@ -40,21 +183,34 @@ class CppGenerator extends BaseGenerator {
 
         const trimmed = value.trim();
 
-        // First, try to parse as JSON directly (handles "[[1,1],[2,2]]" etc.)
-        if (trimmed.startsWith('[') && trimmed.endsWith(']')) {
+        // FIX 3: Handle double-quoted strings FIRST
+        // "hello" → string "hello", "42" → string "42" (not number)
+        if (trimmed.startsWith('"') && trimmed.endsWith('"') && trimmed.length >= 2) {
             try {
+                // Parse as JSON string to handle escape sequences
                 return JSON.parse(trimmed);
             } catch (e) {
-                // Not valid JSON, continue
+                // If JSON parse fails, strip quotes manually
+                return trimmed.slice(1, -1);
             }
         }
 
-        // Try to parse as JSON object
-        if (trimmed.startsWith('{') && trimmed.endsWith('}') && trimmed.includes(':')) {
+        // FIX 6: Handle empty map/object {} before other checks
+        if (trimmed === '{}') {
+            return {};  // Return empty object, not empty array
+        }
+
+        // For JSON arrays and objects, use float-protecting parse
+        if ((trimmed.startsWith('[') && trimmed.endsWith(']')) ||
+            (trimmed.startsWith('{') && trimmed.endsWith('}') && trimmed.includes(':'))) {
             try {
-                return JSON.parse(trimmed);
+                // Protect float literals from JSON.parse()
+                const { modified, floatMap } = this.protectFloatLiterals(trimmed);
+                const parsed = JSON.parse(modified);
+                // Restore __cppFloat wrappers
+                return this.restoreFloatWrappers(parsed, floatMap);
             } catch (e) {
-                // Not valid JSON object, might be C++ initializer
+                // Not valid JSON, continue to other handlers
             }
         }
 
@@ -62,7 +218,7 @@ class CppGenerator extends BaseGenerator {
         if (trimmed.startsWith('{') && trimmed.endsWith('}')) {
             try {
                 // Replace { } with [ ] while preserving strings
-                let result = '';
+                let converted = '';
                 let inString = false;
                 let escapeNext = false;
 
@@ -70,39 +226,40 @@ class CppGenerator extends BaseGenerator {
                     const char = trimmed[i];
 
                     if (escapeNext) {
-                        result += char;
+                        converted += char;
                         escapeNext = false;
                         continue;
                     }
 
                     if (char === '\\') {
-                        result += char;
+                        converted += char;
                         escapeNext = true;
                         continue;
                     }
 
                     if (char === '"') {
                         inString = !inString;
-                        result += char;
+                        converted += char;
                         continue;
                     }
 
                     if (!inString) {
                         if (char === '{') {
-                            result += '[';
+                            converted += '[';
                         } else if (char === '}') {
-                            result += ']';
+                            converted += ']';
                         } else {
-                            result += char;
+                            converted += char;
                         }
                     } else {
-                        result += char;
+                        converted += char;
                     }
                 }
 
-                // Try to parse as JSON
-                const parsed = JSON.parse(result);
-                return parsed;
+                // Now parse with float protection
+                const { modified, floatMap } = this.protectFloatLiterals(converted);
+                const parsed = JSON.parse(modified);
+                return this.restoreFloatWrappers(parsed, floatMap);
             } catch (e) {
                 // If conversion fails, return original value
             }
@@ -116,15 +273,104 @@ class CppGenerator extends BaseGenerator {
         if (trimmed === 'Infinity') return 'Infinity';
         if (trimmed === '-Infinity') return '-Infinity';
 
-        // Try to parse as number
+        // FIX 7: Try to parse as number with scientific notation support
+        // Matches: 42, -42, 3.14, -3.14, 1e-15, 1.5e10, -3.14e-5
+        const hasDecimal = trimmed.includes('.');
+        const hasExponent = /[eE]/.test(trimmed);
+
         if (/^-?\d+$/.test(trimmed)) {
+            // Pure integer (no decimal, no exponent)
             return parseInt(trimmed, 10);
         }
-        if (/^-?\d*\.?\d+$/.test(trimmed)) {
-            return parseFloat(trimmed);
+
+        // Float regex: optional minus, digits, optional decimal+digits, optional exponent
+        if (/^-?\d*\.?\d+([eE][+-]?\d+)?$/.test(trimmed) && (hasDecimal || hasExponent)) {
+            const num = parseFloat(trimmed);
+            // FIX 2 & 8: Preserve float type
+            return { __cppFloat: true, value: num, original: trimmed };
         }
 
         return value;
+    }
+
+    /**
+     * Recursively unwrap __cppFloat wrappers in a value.
+     * Converts { __cppFloat: true, value: 42, original: "42.0" } back to the
+     * original string representation so JSON preserves float type.
+     */
+    unwrapFloats(value) {
+        // Handle __cppFloat wrapper
+        if (value && typeof value === 'object' && value.__cppFloat) {
+            const original = value.original;
+            // Return as number that will serialize correctly
+            // We need to return a value that JSON.stringify will output as a float
+            if (original.includes('.') || /[eE]/.test(original)) {
+                // For values like "42.0", parseFloat gives 42, but we need 42.0 in JSON
+                // JSON.stringify(42) gives "42", not "42.0"
+                // So we mark this for special handling in serializeExpectedForStdin
+                return { __rawFloat: original };
+            }
+            return value.value;
+        }
+
+        // Recurse into arrays
+        if (Array.isArray(value)) {
+            return value.map(item => this.unwrapFloats(item));
+        }
+
+        // Recurse into objects
+        if (value && typeof value === 'object') {
+            const result = {};
+            for (const [k, v] of Object.entries(value)) {
+                result[k] = this.unwrapFloats(v);
+            }
+            return result;
+        }
+
+        // Primitive values pass through unchanged
+        return value;
+    }
+
+    /**
+     * Custom JSON stringify that handles __rawFloat markers.
+     * These need to be output as raw float strings, not quoted.
+     */
+    stringifyWithFloats(value) {
+        if (value === null) return 'null';
+        if (value === undefined) return 'null';
+        if (typeof value === 'boolean') return value ? 'true' : 'false';
+        if (typeof value === 'number') return String(value);
+        if (typeof value === 'string') return JSON.stringify(value);
+
+        // Handle __rawFloat marker - output the original float string directly
+        if (value && typeof value === 'object' && value.__rawFloat) {
+            return value.__rawFloat;
+        }
+
+        // Handle arrays
+        if (Array.isArray(value)) {
+            const items = value.map(item => this.stringifyWithFloats(item));
+            return '[' + items.join(',') + ']';
+        }
+
+        // Handle objects
+        if (typeof value === 'object') {
+            const pairs = Object.entries(value).map(([k, v]) =>
+                JSON.stringify(k) + ':' + this.stringifyWithFloats(v)
+            );
+            return '{' + pairs.join(',') + '}';
+        }
+
+        return String(value);
+    }
+
+    /**
+     * Serialize expected value for stdin delivery.
+     * Recursively unwraps __cppFloat wrappers and preserves float notation.
+     */
+    serializeExpectedForStdin(value) {
+        const unwrapped = this.unwrapFloats(value);
+        return this.stringifyWithFloats(unwrapped);
     }
 
     /**
@@ -172,12 +418,17 @@ class CppGenerator extends BaseGenerator {
     generateRunner(userFiles, testCases) {
         const mainFile = userFiles[0];
 
-        // Generate test calls - call expressions are embedded directly
-        const testCalls = testCases.map((tc, i) => {
-            // Convert C++ syntax to JSON if needed
+        // FIX 1: Build stdin data with expected values (one JSON per line)
+        // This avoids double-escaping issues when embedding in C++ source
+        const stdinLines = testCases.map(tc => {
             const expected = this.convertCppToJson(tc.expected);
-            const expectedJson = this.escapeCpp(JSON.stringify(expected));
+            return this.serializeExpectedForStdin(expected);
+        });
+        const stdinData = stdinLines.join('\n');
 
+        // Generate test calls - expected values read from stdin at runtime
+        const testCount = testCases.length;
+        const testCalls = testCases.map((tc, i) => {
             // The call is used directly as C++ code
             const callCode = tc.call;
             return `
@@ -186,7 +437,7 @@ class CppGenerator extends BaseGenerator {
         result["index"] = ${i};
         try {
             auto actual = ${callCode};
-            auto expected = json::parse("${expectedJson}");
+            json expected = expectedValues[${i}];
             bool passed = compareResults(actual, expected);
             result["actual"] = serializeValue(actual);
             result["expected_serialized"] = expected;  // Include what we compared against
@@ -277,6 +528,12 @@ template<typename T> json serializeValue(const unordered_set<T>& s);
 template<typename T>
 json serializeValue(const T& val) {
     return json(val);
+}
+
+// FIX 5: Char serialization - convert to single-character string, not ASCII int
+template<>
+json serializeValue(const char& val) {
+    return json(string(1, val));
 }
 
 // Pair serialization
@@ -388,6 +645,14 @@ json serializeValue(const optional<T>& opt) {
         return serializeValue(opt.value());
     }
     return nullptr;
+}
+
+// FIX 4: Variant serialization - visit and serialize the active alternative
+template<typename... Ts>
+json serializeValue(const variant<Ts...>& var) {
+    return visit([](const auto& val) -> json {
+        return serializeValue(val);
+    }, var);
 }
 
 // ============================================================================
@@ -525,6 +790,16 @@ template<>
 bool compareResults(const bool& actual, const json& expected) {
     if (expected.is_boolean()) {
         return actual == expected.get<bool>();
+    }
+    return false;
+}
+
+// FIX 5: Char comparison - compare as single-character string
+template<>
+bool compareResults(const char& actual, const json& expected) {
+    if (expected.is_string()) {
+        string s = expected.get<string>();
+        return s.length() == 1 && s[0] == actual;
     }
     return false;
 }
@@ -672,11 +947,28 @@ bool compareResults(const optional<T>& actual, const json& expected) {
     return compareResults(actual.value(), expected);
 }
 
+// FIX 4: Variant comparison - compare the active alternative
+template<typename... Ts>
+bool compareResults(const variant<Ts...>& actual, const json& expected) {
+    return visit([&expected](const auto& val) -> bool {
+        return compareResults(val, expected);
+    }, actual);
+}
+
 // ============================================================================
 // MAIN - TEST EXECUTION
 // ============================================================================
 
 int main() {
+    // FIX 1: Read expected values from stdin (one JSON per line)
+    vector<json> expectedValues;
+    string line;
+    while (getline(cin, line)) {
+        if (!line.empty()) {
+            expectedValues.push_back(json::parse(line));
+        }
+    }
+
     vector<json> results;
 
     ${testCalls}
@@ -691,7 +983,7 @@ int main() {
                 { name: '__test_runner__.cpp', content: runnerCode.trim() }
             ],
             entryPoint: '__test_runner__.cpp',
-            stdin: ''
+            stdin: stdinData  // FIX 1: Pass expected values via stdin
         };
     }
 }
