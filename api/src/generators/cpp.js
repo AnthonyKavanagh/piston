@@ -21,6 +21,7 @@ const BaseGenerator = require('./base');
  * - FIX 6: Empty map {} detection (fixes t16)
  * - FIX 7: Scientific notation in number regex (fixes t30)
  * - FIX 8: Type coercion prevention via explicit float markers
+ * - FIX 9: String-containing-JSON pattern (fixes string funcs returning JSON-like content)
  */
 class CppGenerator extends BaseGenerator {
     constructor() {
@@ -783,7 +784,15 @@ bool compareResults(const string& actual, const json& expected) {
     if (expected.is_string()) {
         return actual == expected.get<string>();
     }
-    return false;
+    // FIX 9: String-containing-JSON pattern
+    // If actual is a string but expected is NOT a string (array, object, number, boolean, null),
+    // try parsing the string content as JSON and compare the parsed value
+    try {
+        json parsed = json::parse(actual);
+        return parsed == expected;
+    } catch (...) {
+        return false;
+    }
 }
 
 template<>
