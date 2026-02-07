@@ -785,14 +785,15 @@ bool compareResults(const string& actual, const json& expected) {
         return actual == expected.get<string>();
     }
     // FIX 9: String-containing-JSON pattern
-    // If actual is a string but expected is NOT a string (array, object, number, boolean, null),
-    // try parsing the string content as JSON and compare the parsed value
+    // Only parse strings that look like JSON structures (arrays or objects).
+    // Simple values like "42", "true", "null" should NOT be parsed to preserve strict type checking.
     try {
-        json parsed = json::parse(actual);
-        return parsed == expected;
-    } catch (...) {
-        return false;
-    }
+        if (!actual.empty() && (actual.front() == '[' || actual.front() == '{')) {
+            json parsed = json::parse(actual);
+            return parsed == expected;
+        }
+    } catch (...) {}
+    return false;
 }
 
 template<>
