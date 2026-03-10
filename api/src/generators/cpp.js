@@ -416,6 +416,151 @@ class CppGenerator extends BaseGenerator {
         return String(value);
     }
 
+    /**
+     * Parse struct definitions from C++ source and generate to_json overloads
+     * so nlohmann::json can serialize user-defined structs.
+     * Returns empty string if no structs found.
+     */
+    generateStructToJson(sourceCode) {
+        const structs = [];
+
+        // Pre-compute brace depth at every character position.
+        // Only structs at depth 0 (file scope) get to_json overloads.
+        // Structs inside function bodies (depth > 0) are local and invisible
+        // at file scope, so generating a file-scope to_json for them would
+        // cause a compile error.
+        const depthAt = new Int32Array(sourceCode.length);
+        let braceDepth = 0;
+        let inString = false;
+        let inChar = false;
+        let inLineComment = false;
+        let inBlockComment = false;
+        for (let i = 0; i < sourceCode.length; i++) {
+            const ch = sourceCode[i];
+            const next = i + 1 < sourceCode.length ? sourceCode[i + 1] : '';
+
+            if (inLineComment) {
+                if (ch === '\n') inLineComment = false;
+                depthAt[i] = braceDepth;
+                continue;
+            }
+            if (inBlockComment) {
+                if (ch === '*' && next === '/') { inBlockComment = false; depthAt[i] = braceDepth; i++; depthAt[i] = braceDepth; continue; }
+                depthAt[i] = braceDepth;
+                continue;
+            }
+            if (inString) {
+                if (ch === '\\') { depthAt[i] = braceDepth; i++; if (i < sourceCode.length) depthAt[i] = braceDepth; continue; }
+                if (ch === '"') inString = false;
+                depthAt[i] = braceDepth;
+                continue;
+            }
+            if (inChar) {
+                if (ch === '\\') { depthAt[i] = braceDepth; i++; if (i < sourceCode.length) depthAt[i] = braceDepth; continue; }
+                if (ch === '\'') inChar = false;
+                depthAt[i] = braceDepth;
+                continue;
+            }
+
+            if (ch === '/' && next === '/') { inLineComment = true; depthAt[i] = braceDepth; continue; }
+            if (ch === '/' && next === '*') { inBlockComment = true; depthAt[i] = braceDepth; i++; depthAt[i] = braceDepth; continue; }
+            if (ch === '"') { inString = true; depthAt[i] = braceDepth; continue; }
+            if (ch === '\'') { inChar = true; depthAt[i] = braceDepth; continue; }
+
+            if (ch === '{') { depthAt[i] = braceDepth; braceDepth++; continue; }
+            if (ch === '}') { braceDepth = Math.max(0, braceDepth - 1); depthAt[i] = braceDepth; continue; }
+            depthAt[i] = braceDepth;
+        }
+
+        // Match both named structs and typedef structs:
+        //   struct Foo { ... };           → name = "Foo"
+        //   typedef struct { ... } Bar;   → name = "Bar"
+        const patterns = [
+            { regex: /struct\s+(\w+)\s*\{/g, nameGroup: 1, isTypedef: false },
+            { regex: /typedef\s+struct\s*\{/g, nameGroup: -1, isTypedef: true },
+        ];
+
+        const extractFields = (sourceCode, bodyStart) => {
+            let depth = 1;
+            let i = bodyStart;
+            while (i < sourceCode.length && depth > 0) {
+                if (sourceCode[i] === '{') depth++;
+                if (sourceCode[i] === '}') depth--;
+                i++;
+            }
+            if (depth !== 0) return null;
+
+            const body = sourceCode.substring(bodyStart, i - 1);
+            const fields = [];
+
+            for (const line of body.split('\n')) {
+                const trimmed = line.trim();
+                if (!trimmed || trimmed.startsWith('//') || trimmed.startsWith('/*') ||
+                    trimmed.startsWith('*') || /^(public|private|protected)\s*:/.test(trimmed)) continue;
+                if (trimmed.includes('(')) continue;
+                const cleaned = trimmed.replace(/\s*=\s*[^;]*;$/, ';').replace(/;$/, '').trim();
+                if (!cleaned) continue;
+                const parts = cleaned.split(/\s+/);
+                const fieldName = parts[parts.length - 1];
+                if (/^\w+$/.test(fieldName) && parts.length >= 2) {
+                    fields.push(fieldName);
+                }
+            }
+
+            return { fields, closingPos: i };
+        };
+
+        // Pass 1: named structs (struct Foo { ... })
+        let match;
+        const namedRegex = /struct\s+(\w+)\s*\{/g;
+        while ((match = namedRegex.exec(sourceCode)) !== null) {
+            if (depthAt[match.index] > 0) continue;
+            const bodyStart = match.index + match[0].length;
+            const result = extractFields(sourceCode, bodyStart);
+            if (result && result.fields.length > 0) {
+                structs.push({ name: match[1], fields: result.fields });
+            }
+        }
+
+        // Pass 2: typedef structs (typedef struct { ... } Name;)
+        const typedefRegex = /typedef\s+struct\s*\{/g;
+        while ((match = typedefRegex.exec(sourceCode)) !== null) {
+            if (depthAt[match.index] > 0) continue;
+            const bodyStart = match.index + match[0].length;
+            const result = extractFields(sourceCode, bodyStart);
+            if (!result || result.fields.length === 0) continue;
+            // Extract the typedef name after the closing brace: } Name;
+            const afterClose = sourceCode.substring(result.closingPos).match(/^\s*(\w+)\s*;/);
+            if (afterClose) {
+                const name = afterClose[1];
+                // Skip if we already have a named struct with this name
+                if (!structs.some(s => s.name === name)) {
+                    structs.push({ name, fields: result.fields });
+                }
+            }
+        }
+
+        if (structs.length === 0) return '';
+
+        const overloads = structs.map(s => {
+            const entries = s.fields.map(f => `        {"${f}", s.${f}}`).join(',\n');
+            return `// Auto-generated to_json for struct ${s.name}
+void to_json(nlohmann::json& j, const ${s.name}& s) {
+    j = nlohmann::json{
+${entries}
+    };
+}`;
+        }).join('\n\n');
+
+        return `
+// ============================================================================
+// AUTO-GENERATED STRUCT SERIALIZATION (to_json overloads)
+// ============================================================================
+
+${overloads}
+`;
+    }
+
     generateRunner(userFiles, testCases) {
         const mainFile = userFiles[0];
 
@@ -511,6 +656,8 @@ using namespace std;
 // ============================================================================
 
 ${mainFile.content}
+
+${this.generateStructToJson(mainFile.content)}
 
 // ============================================================================
 // SERIALIZATION HELPERS

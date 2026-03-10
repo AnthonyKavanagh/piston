@@ -48,6 +48,7 @@ from decimal import Decimal, ROUND_HALF_UP, ROUND_DOWN, ROUND_UP
 from fractions import Fraction
 from datetime import datetime, date, time, timedelta
 from typing import List, Dict, Set, Tuple, Optional, Union, Any, Callable
+import dataclasses
 
 sys.path.insert(0, '.')
 
@@ -75,6 +76,24 @@ def deep_equals(a, b):
     if isinstance(a, float) and isinstance(b, float):
         if math.isnan(a) and math.isnan(b):
             return True
+
+    # Dataclass handling: convert to dict for comparison when matched against a dict
+    a_is_dc = dataclasses.is_dataclass(a) and not isinstance(a, type)
+    b_is_dc = dataclasses.is_dataclass(b) and not isinstance(b, type)
+    if a_is_dc or b_is_dc:
+        if a_is_dc:
+            a = dataclasses.asdict(a)
+        if b_is_dc:
+            b = dataclasses.asdict(b)
+        return deep_equals(a, b)
+
+    # namedtuple handling: namedtuple IS a tuple subclass but type() differs
+    if isinstance(a, tuple) and isinstance(b, tuple) and hasattr(a, '_fields') != hasattr(b, '_fields'):
+        return deep_equals(tuple(a), tuple(b))
+
+    # int/float equality: 2 == 2.0, 0 == 0.0 (round-number floats match ints)
+    if isinstance(a, (int, float)) and isinstance(b, (int, float)) and not isinstance(a, bool) and not isinstance(b, bool):
+        return a == b
 
     # STRICT type check - no coercion
     if type(a) != type(b):
@@ -151,6 +170,9 @@ def serialize(value):
         return {"__type__": "frozenset", "value": sorted([serialize(v) for v in value], key=lambda x: str(x))}
     if isinstance(value, deque):
         return {"__type__": "deque", "value": [serialize(v) for v in value]}
+    # Dataclass: convert to dict via asdict() (recursive)
+    if dataclasses.is_dataclass(value) and not isinstance(value, type):
+        return {"__type__": "dict", "value": {k: serialize(v) for k, v in dataclasses.asdict(value).items()}}
     # For other types, try to convert to string
     return {"__type__": type(value).__name__, "value": str(value)}
 
